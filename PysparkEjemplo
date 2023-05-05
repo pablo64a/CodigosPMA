@@ -1,0 +1,253 @@
+%pyspark
+from pyspark.context import SparkContext,SparkConf
+from pyspark.sql.session import SparkSession
+from pyspark.sql import SQLContext
+from pyspark.sql.functions import *
+from pyspark.sql.types import *
+from pyspark import SparkFiles
+from pyspark.sql import functions as F
+from datetime import  datetime, timedelta, date
+from pyspark.sql.types import StringType
+import datetime 
+from decimal import Decimal
+from pyspark.sql.window import Window
+from dateutil.relativedelta import relativedelta
+import os
+import re
+import sys
+import functools
+#from pyspark.sql.group import GroupedData
+
+#reload(sys)
+#sys.setdefaultencoding('UTF-8')
+### Control de cambios ######################################################################
+###
+### Nombre proceso: Tmp_Cliente_Infoclientes_Nat_CargaStage
+### Fecha de creación: 2020-08-21
+### Usuario Creación: S69570 - Pablo G. Mamani Arhuata
+### Descripción: Tabla temporal que almacena informacion pricipal de la fuente Infoclientes Persona Natural
+### Fuentes principales: Infoclientes
+### Periodicidad de actualización: Rapida, la tabla se particiona por fecha
+###
+######################################################################################################################
+
+print("Inicio Context-------------------------------------------------------------------------------------------------")
+spark = SparkSession \
+    .builder \
+    .appName("Dim_cliente_des_v2") \
+    .getOrCreate()
+#sys.setdefaultencoding('UTF-8')
+print("Fin context-------------------------------------------------------------------------------------------------")
+
+fecha_inicio= datetime.datetime.now()
+
+
+servidorHDFS = "btbclo02:8020/DATA_LAKE/produccion/datos"
+servidorHDFS2 = "btbclo02:8020/DATA_LAKE/certificacion/datos"
+
+DF_fecha_proc                  = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_dicdwh").select("c_cod_fue").filter(col("c_cod_tip_dat")=='TBLLEX')
+v_fecha = DF_fecha_proc.rdd.flatMap(list).first()
+#print(v_fecha) 
+
+
+DF_dim_dicdwh=spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_dicdwh").where("c_cod_tip_dat='TBLLEX'")
+fecha_dic= DF_dim_dicdwh.selectExpr("to_date(FROM_UNIXTIME(UNIX_TIMESTAMP(c_cod_fue,'yyyyMMdd'))) as v_fecha").where("c_cod_tip_dat='TBLLEX' AND d_des_dim='FECHADIA'")
+v_fecha = fecha_dic.rdd.flatMap(list).first()
+v_fecha = v_fecha.strftime('%Y%m%d')   #20210915
+print(v_fecha)
+a_date = datetime.datetime.strptime(v_fecha[0:6]+"01", "%Y%m%d")
+a_month = relativedelta(days=1)
+v_fecha_mes = (a_date - a_month).strftime('%Y%m%d') #202109
+a_month = relativedelta(days=1)
+#v_fecha_mes = (v_fecha_mes.strftime('%Y%m%d') - a_month).strftime('%Y%m%d') #202109
+print(v_fecha_mes)
+
+DF_fecha_proc                  = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_dicdwh").select("c_cod_fue").filter(col("c_cod_tip_dat")=='TBLLEX')
+v_fecha = DF_fecha_proc.rdd.flatMap(list).first()
+#v_fecha = v_fecha.strftime('%Y%m%d')
+
+#Lectura de todas las tablas de RepExt - Landing
+DF_tbldbc_clasificado      = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/REPEXT_dia/RepExtCli/TBLDBC").where(col("cl_tippersona") == 'P')
+DF_tbldcp                  = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/REPEXT_dia/RepExtCli/TBLDCP")
+DF_tbldce                  = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/REPEXT_dia/RepExtCli/TBLDCE")
+DF_lexicos                 = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/REPEXT_dia/RepExtOtr/TBLLEXICOS")
+DF_tblfunnegocio           = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/REPEXT_dia/RepExtFun/TBLFUNNEG")
+DF_tblctapas               = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/REPEXT_dia/RepExtOpe/TBLCTAPAS")
+DF_tblctaact               = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/REPEXT_dia/RepExtOpe/TBLCTAACT")
+DF_tbllexicos              = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/REPEXT_dia/RepExtOtr/TBLLEXICOS").filter(F.col("LX_TIPOLEX").isin("CODPROFE"))
+DF_neg_cliente             = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/ARCHNEG/ARCHNEGCli/CLIENTE")
+DF_cictbll01calif          = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/REPEXT_Mes/RepExtCliMes/CICTBLL01CALIF")\
+                                .where((trim(col("TIPO_FONDO"))=='BANCO') & (col("CodTipoTransaccion") =='A'))
+                                
+#Lectura de tabla consolidada de InfoCliente - PN
+DF_infocliente_nat         = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/UsrBD_DL_Tmp_Cliente_InfoclienteNat")
+df_info_parametro_nac      = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PARAMETRO").filter(F.col("CODIGO").isin("NACIONALIDAD","ESTADO_CIVIL"))
+df_info_profesion          = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PROFESION")
+                                
+
+#Lectura de tablas DataEntry MKT - Landing
+#v_fecha = v_fecha.strftime('%Y%m%d')   #20210915
+a_date = datetime.datetime.strptime(v_fecha[0:6]+"01", "%Y%m%d")
+a_month = relativedelta(days=1)
+v_fec_de = (a_date - a_month).strftime('%Y%m') #202109
+print("v_fec_de: "+v_fec_de)
+DF_mkt_ingresos            = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/PDMKT/DataEntryCli/Ingresos/FEC_PROCESO=" +'202302')#+v_fec_de)
+DF_mkt_segmentos           = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/PDMKT/DataEntryCli/Segmentos/FEC_PROCESO="+'202302')#+v_fec_de)
+DF_mkt_prescore            = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/PDMKT/DataEntryCli/PreScore/FEC_PROCESO=" +'202302')#+v_fec_de)
+DF_mkt_pdh                 = spark.read.parquet("hdfs://"+servidorHDFS+"/landing.db/PDMKT/DataEntryCli/PDH/FEC_PROCESO="      +'202302')#+v_fec_de)
+
+#Lectura de todas las tablas satelites - Enterprise
+#        DF_dicDWH         = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_dicdwh").select("c_cod_tip_dat","d_des_dim","c_cod_fue","d_des_cod","d_prm1","d_prm2","d_prm3","d_prm4","d_prm5","d_prm6").filter(col("c_cod_tip_dat")=='TBLLEX')
+DF_dim_dicDWH_prm          = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_dicdwh").select("c_cod_fue","c_cod_tip_dat","d_des_cod")\
+                                                .filter(col("c_cod_tip_dat").isin('NACIONALID','FINSOCIAL','TIPCLIENTE','OCUPACION','NIVEDU','MAGEMPRESA','STATUS','TIPBAN','SEG'))
+DF_dim_nivel_educacion     = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_nivel_educacion")
+DF_dim_activ_eco           = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_activ_economica")
+DF_dim_est_civ             = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_estado_civil")
+DF_dim_pais                = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_pais")
+DF_dim_calificacion        = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_calificacion")
+DF_dim_sit_laboral         = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_situacion_laboral")
+DF_dim_entidad_financiera  = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_entidad_financiera")
+DF_dim_banca               = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_banca")
+DF_dim_unidad_funcional    = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_unidad_funcional")
+DF_dim_agencia             = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_agencia")
+DF_dim_agencias            = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_agencias")
+DF_dim_sucursales          = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_sucursales")
+DF_dim_regionales          = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_regionales")
+DF_dim_tipo_viv            = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_tipo_vivienda")
+DF_dim_calificacion        = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_calificacion")
+DF_dim_entidad_financiera  = DF_dim_entidad_financiera\
+                                    .selectExpr('*',\
+                                        "row_number() over( partition by c_ncent,c_ceent order by dw_flg_estado desc, key_id_ent_fin desc) as Dent_ROW").filter("Dent_ROW ='1'").drop("Dent_ROW")
+                                        
+DF_mkt_ingresos  = DF_mkt_ingresos\
+                                    .selectExpr('*',\
+                                        "row_number() over( partition by CIC order by INGRESO_USD) as ROW_NUM").filter("ROW_NUM = '1'").drop("ROW_NUM")
+DF_mkt_segmentos = DF_mkt_segmentos\
+                                    .selectExpr('*',\
+                                        "row_number() over( partition by CIC order by FEC_DATOS desc, COD_SEGMENTO desc) as ROW_NUM").filter("ROW_NUM ='1'").drop("ROW_NUM")
+DF_mkt_prescore  = DF_mkt_prescore\
+                                    .selectExpr('*',\
+                                        "row_number() over( partition by CIC order by SLDO_PROM_PASIVO desc) as ROW_NUM").filter("ROW_NUM ='1'").drop("ROW_NUM")
+DF_mkt_pdh       = DF_mkt_pdh\
+                                    .selectExpr('*',\
+                                        "row_number() over( partition by CIC order by PH_CICEMP desc, PH_NIT_EMPRESA desc, PH_NOMEMPRESA_ULT desc) as ROW_NUM").filter("ROW_NUM ='1'").drop("ROW_NUM")
+
+#Lectura de todas las tablas satelites que son particionadas - Enterprise
+DF_sat_direccion_domicilio = spark.read.parquet("hdfs://"+servidorHDFS2+"/enterprise.db/direccion_domicilio/fec_part=" +'20230331') #+ v_fecha)
+DF_sat_direccion_laboral   = spark.read.parquet("hdfs://"+servidorHDFS2+"/enterprise.db/direccion_laboral/fec_part="   +'20230331') #+ v_fecha)
+########DF_dim_personal_bcp        = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_personal_bcp/fec_part="+v_fecha)
+DF_dim_contactabilidad     = spark.read.parquet("hdfs://"+servidorHDFS+"/enterprise.db/dwh_dim_contactabilidad/fec_part="+v_fecha)
+
+
+#Identificacion de clientes vigentes en base a sus cuentas pasivas o activas
+DF_tblctapas_vig = DF_tblctapas.filter("CP_SITUACION NOT IN ('03','04','05','06','08','35')").selectExpr("CP_CIC AS CL_CIC").distinct()
+DF_tblctaact_vig = DF_tblctaact.filter("CA_SITUACION NOT IN ('03','04','05','06','08','35')").selectExpr("CA_CIC AS CL_CIC").distinct()
+DF_tblcuentas_vig = DF_tblctapas_vig.union(DF_tblctaact_vig).distinct()
+DF_tbldbc_clasificado = DF_tbldbc_clasificado.alias('A').join(DF_tblcuentas_vig.alias('B'),DF_tbldbc_clasificado.CL_CIC ==  DF_tblcuentas_vig.CL_CIC,"left")\
+                                .select("A.*",when(~col("B.CL_CIC").isNull(),1).otherwise(lit(0)).alias("fl_cli_vig"))
+                                
+                                
+DF_dim_cli_rpx = DF_tbldbc_clasificado.alias('DBC').join(DF_tbldcp.alias('DCP'),DF_tbldbc_clasificado.CL_CIC == DF_tbldcp.CL_CIC, "left")\
+                                                   .join(DF_tbldce.alias('DCE'),DF_tbldbc_clasificado.CL_CIC == DF_tbldce.CL_CIC, "left")\
+                                                   .join(DF_dim_activ_eco.alias('DIMACT'),trim(DF_tbldbc_clasificado.CL_ACTECONOMICA) == trim(DF_dim_activ_eco.c_act_eco), "left")\
+                    .selectExpr("DBC.CL_CIC"\
+                            ,"DBC.CL_IDC"\
+                            ,"TRIM(DBC.CL_TIPIDC)            AS CL_TIPIDC"\
+                            ,"TRIM(DBC.CL_EXTIDC)            AS CL_EXTIDC"\
+                            ,"TRIM(DBC.CL_CODSBS)            AS CL_CODSBS"\
+                            ,"TRIM(DBC.CL_ESTADONIT)         AS CL_ESTADONIT"\
+                            ,"TRIM(DBC.CL_RUC)               AS CL_RUC"\
+                            ,"TRIM(DBC.CL_PATCLIENTE)        AS CL_PATCLIENTE"\
+                            ,"TRIM(DBC.CL_MATCLIENTE)        AS CL_MATCLIENTE"\
+                            ,"TRIM(DBC.CL_NOMBRECLIENTE)     AS CL_NOMBRECLIENTE"\
+                            ,"CONCAT(RTRIM(DBC.CL_PATCLIENTE), ' ', RTRIM(DBC.CL_MATCLIENTE), ' ', RTRIM(DBC.CL_NOMBRECLIENTE)) AS CL_NOMCLIENTE"\
+                            ,"TRIM(DBC.CL_FINSOCIAL)         AS CL_FINSOCIAL"\
+                            ,"TRIM(DBC.CL_FEC01)             AS CL_FEC01"\
+                            ,"TRIM(DBC.CL_TIPCLIENTE)        AS CL_TIPCLIENTE"\
+                            ,"TRIM(COALESCE(DBC.CL_MAGNITUD,''))          AS CL_MAGNITUD"\
+                            ,"TRIM(COALESCE(DBC.CL_CODBANCA,''))          AS CL_CODBANCA"\
+                            ,"CASE WHEN (DBC.CL_SEGBANCA IS NOT NULL) AND TRIM(DBC.CL_SEGBANCA) <>'' THEN CONCAT(RTRIM(DBC.CL_TIPBANCA), RTRIM(DBC.CL_SEGBANCA)) ELSE '' END AS C_SEG"
+                            ,"TRIM(COALESCE(DBC.CL_TIPBANCA,''))          AS CL_TIPBANCA"\
+                            ,"TRIM(COALESCE(DBC.CL_SUBSEGBANCA,''))       AS CL_SUBSEGBANCA"\
+                            ,"TRIM(DBC.CL_TIPPERSONA)        AS CL_TIPPERSONA"\
+                            ,"TRIM(DBC.CL_FUNNEGOCIOS)       AS CL_FUNNEGOCIOS"\
+                            ,"TRIM(DBC.CL_OFICINA)           AS CL_OFICINA"\
+                            ,"TRIM(DBC.CL_FECCLARIESGOMANUAL)       AS CL_FECCLARIESGOMANUAL"\
+                            ,"TRIM(DBC.CL_FECULTMODIF)       AS CL_FECULTMODIF"\
+                            ,"TRIM(DBC.CL_NOMCOMERCIAL)      AS CL_NOMCOMERCIAL"\
+                            ,"TRIM(DBC.CL_NROREGMERCANTIL)   AS CL_NROREGMERCANTIL"\
+                            ,"TRIM(DBC.CL_RESIDENTE)         AS CL_RESIDENTE"\
+                            ,"TRIM(DBC.CL_SECTOR)            AS CL_SECTOR"\
+                            ,"TRIM(DBC.CL_SITUACION)         AS CL_SITUACION"\
+                            ,"TRIM(DBC.CL_STAELIMINACION)    AS CL_STAELIMINACION"\
+                            ,"TRIM(DBC.CL_TIPCLARIESGOBCP)   AS CL_TIPCLARIESGOBCP"\
+                            ,"TRIM(DBC.CL_TIPCLARIESGOMANUAL)            AS CL_TIPCLARIESGOMANUAL"\
+                            ,"TRIM(DBC.CL_FECINGRESO)        AS CL_FECINGRESO"\
+                            ,"TRIM(DBC.CL_FECCLARIESGOBCP)   AS CL_FECCLARIESGOBCP"\
+                            ,"TRIM(DCP.CL_NACIONALIDAD)      AS CL_NACIONALIDAD"\
+                            ,"TRIM(DCP.CL_ESTCIVIL)          AS CL_ESTCIVIL"\
+                            ,"TRIM(DCP.CL_SITLABORAL)        AS CL_SITLABORAL"\
+                            ,"TRIM(DCP.CL_PROFESION)         AS CL_PROFESION"\
+                            ,"TRIM(DCP.CL_SEXO)              AS CL_SEXO"\
+                            ,"TRIM(DCP.CL_ACTSECUNDARIA)     AS CL_ACTSECUNDARIA"\
+                            ,"TRIM(COALESCE(DCE.CL_CATEGORIA,''))         AS CL_CATEGORIA"\
+                            ,"TRIM(COALESCE(DCE.CL_TIPEMPRESA,''))        AS CL_TIPEMPRESA"\
+                            ,"TRIM(COALESCE(DCE.CL_TIPSOCIEDAD,''))       AS CL_TIPSOCIEDAD"\
+                            ,"COALESCE(DIMACT.key_id_act_eco,1) AS key_id_act_eco")
+
+DF_dim_cli_rpx = DF_dim_cli_rpx.alias('DBCRP').join(DF_dim_activ_eco.alias('DIMACTSEC'),trim(DF_dim_cli_rpx.CL_ACTSECUNDARIA) == trim(DF_dim_activ_eco.c_act_eco), "left")\
+                    .selectExpr("DBCRP.*","COALESCE(DIMACTSEC.key_id_act_eco,1) AS key_id_act_eco_sec")
+                    
+
+DF_dim_cli_rpx_info = DF_dim_cli_rpx.alias('DBC').join(DF_infocliente_nat.alias('INFO'),DF_dim_cli_rpx.CL_CIC == DF_infocliente_nat.c_cic, "left")\
+                                                 .join(df_info_parametro_nac.alias('INFONAC'),(trim(DF_dim_cli_rpx.CL_NACIONALIDAD) == df_info_parametro_nac.ABREV_DESCRIPCION) & (df_info_parametro_nac.CODIGO == 'NACIONALIDAD'), "left")\
+                                                 .join(DF_dim_dicDWH_prm.alias('DICDWH'),(trim(DF_dim_cli_rpx.CL_TIPCLIENTE) == DF_dim_dicDWH_prm.c_cod_fue) & (DF_dim_dicDWH_prm.c_cod_tip_dat == 'TIPCLIENTE'), "left")\
+                                                 .join(df_info_profesion.alias('INFOPROF'),(trim(DF_dim_cli_rpx.CL_PROFESION) == df_info_profesion.HOST_ID), "left")\
+                                                 .join(DF_tbllexicos.alias('RPXPROF'),(trim(DF_dim_cli_rpx.CL_PROFESION) == DF_tbllexicos.LX_CODIGO_BCR), "left")\
+                                                 .join(DF_tbldbc_clasificado.alias('VIG'),DF_dim_cli_rpx.CL_CIC == DF_tbldbc_clasificado.CL_CIC, "left")\
+                        .selectExpr("DBC.CL_CIC AS c_cic"\
+                            ,"TRIM(DBC.CL_FUNNEGOCIOS) AS c_mat"\
+                            ,"CASE WHEN COALESCE(INFO.c_nac,'') not in ('','NDI') THEN INFO.c_nac ELSE TRIM(DBC.CL_NACIONALIDAD) END AS c_nac"\
+                            ,"DBC.CL_FINSOCIAL AS c_fin_soc"\
+                            ,"DBC.CL_IDC AS c_idc"\
+                            ,"CASE WHEN COALESCE(INFO.d_ape_pat,DBC.CL_PATCLIENTE) <> '' THEN COALESCE(INFO.d_ape_pat,DBC.CL_PATCLIENTE) ELSE DBC.CL_PATCLIENTE    END AS d_ape_pat"\
+                            ,"CASE WHEN COALESCE(INFO.d_ape_mat,DBC.CL_MATCLIENTE) <> '' THEN COALESCE(INFO.d_ape_mat,DBC.CL_MATCLIENTE) ELSE DBC.CL_MATCLIENTE    END AS d_ape_mat"\
+                            ,"CASE WHEN COALESCE(INFO.d_nom,DBC.CL_NOMBRECLIENTE)  <> '' THEN COALESCE(INFO.d_nom,DBC.CL_NOMBRECLIENTE)  ELSE DBC.CL_NOMBRECLIENTE END AS d_nom"\
+                            ,"CASE WHEN COALESCE(INFO.d_des_nac,'') not in ('','NO ESPECIFICA') THEN INFO.d_des_nac ELSE COALESCE(INFONAC.DESCRIPCION,DBC.CL_NACIONALIDAD) END AS d_des_nac"\
+                            ,"CASE WHEN COALESCE(INFO.f_fec_nac,'') not in ('','19000101') THEN INFO.f_fec_nac \
+                                   WHEN COALESCE(INFO.f_fec_nac,'')     in ('','19000101') AND TRIM(DBC.CL_FEC01) NOT IN ('','00000000') THEN DBC.CL_FEC01 \
+                                   ELSE '19000101' END AS f_fec_nac"\
+                            ,"DBC.CL_TIPCLIENTE AS c_tip_cli"\
+                            ,"DICDWH.d_des_cod AS d_des_tip_cli"\
+                            ,"CASE WHEN COALESCE(INFO.c_est_civ,'') not in ('','NDI') THEN INFO.c_est_civ \
+                                   WHEN COALESCE(INFO.c_est_civ,'')     in ('','NDI') AND TRIM(DBC.CL_ESTCIVIL) <> '' THEN DBC.CL_ESTCIVIL \
+                                   ELSE 'SOL' END AS c_est_civ"\
+                            ,"CASE WHEN COALESCE(INFO.c_ocu,'') not in ('','NDI') THEN INFO.c_ocu \
+                                   WHEN COALESCE(INFO.c_ocu,'')     in ('','NDI') AND TRIM(DBC.CL_SITLABORAL) <> '' THEN DBC.CL_SITLABORAL \
+                                   ELSE 'EST' END AS c_ocu"\
+                            ,"CASE WHEN COALESCE(INFO.c_prf,'') not in ('','NDI') THEN INFO.c_prf \
+                                   WHEN COALESCE(INFO.c_prf,'')     in ('','NDI') AND TRIM(COALESCE(INFOPROF.PROFESION_ID,'')) <> '' THEN TRIM(INFOPROF.PROFESION_ID) \
+                                   ELSE '' END AS c_prf"\
+                            ,"CASE WHEN COALESCE(INFO.d_des_prf,'') not in ('','NO DIO INFORMACION SOLICITADA') THEN INFO.d_des_prf \
+                                   WHEN COALESCE(INFO.d_des_prf,'')     in ('','NO DIO INFORMACION SOLICITADA') AND TRIM(COALESCE(INFOPROF.DESCRIPCION_PROF,'')) <> '' THEN TRIM(INFOPROF.DESCRIPCION_PROF) \
+                                   WHEN COALESCE(INFO.d_des_prf,'')     in ('','NO DIO INFORMACION SOLICITADA') AND TRIM(COALESCE(INFOPROF.DESCRIPCION_PROF,'')) = '' AND TRIM(RPXPROF.LX_DESC_LARGA) <> '' THEN TRIM(RPXPROF.LX_DESC_LARGA) \
+                                   ELSE 'ESTUDIANTE' END AS d_des_prf"\
+                            ,"CASE WHEN COALESCE(INFO.c_sex,'') not in ('','NDI') THEN INFO.c_sex \
+                                   WHEN COALESCE(INFO.c_sex,'')     in ('','NDI') AND TRIM(DBC.CL_SEXO) <> '' THEN DBC.CL_SEXO \
+                                   ELSE '' END AS c_sex"\
+                            ,"CASE WHEN COALESCE(INFO.d_des_sex,'') not in ('','NO ESPECIFICA') THEN INFO.d_des_sex \
+                                   WHEN COALESCE(INFO.d_des_sex,'')     in ('','NO ESPECIFICA') AND TRIM(DBC.CL_SEXO) = 'M' THEN 'MASCULINO' \
+                                   WHEN COALESCE(INFO.d_des_sex,'')     in ('','NO ESPECIFICA') AND TRIM(DBC.CL_SEXO) = 'F' THEN 'FEMENINO' \
+                                   ELSE 'NO ESPECIFICA' END AS d_des_sex"\
+                            
+                            ,"fl_cli_vig"\
+                            )
+                            
+
+DF_dim_cli_rpx_info.groupBy(col('fl_cli_vig')\
+                ,col('c_est_civ')).count()\
+                .orderBy(col('fl_cli_vig').asc(),col('count').desc(),col('c_est_civ').asc()).show(50,False)  
+
+
+
+
