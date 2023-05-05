@@ -1,0 +1,3127 @@
+USE [BD_STAGEBCP]
+GO
+
+/****** Object:  StoredProcedure [Dwh].[Dim_cliente_CargaDW]    Script Date: 12/03/2020 16:50:14 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+      
+CREATE PROCEDURE [Dwh].[Dim_cliente_CargaDW]            
+AS            
+----/*****************************************************************************************************            
+--*Descripcion: Carga de DIM  BD_DWBCP.Dwh.Dim_cliente												     *            
+--*Fecha Crea: 23/11/2009																				 *            
+--*Fecha Mod: 23/11/2009																				 *            
+--*Parametros:																							 *            
+--*Autor: Silvia Loza																					 *            
+--*Cambios Importantes:ACB1-Adición genéricos GM94  y mejoras tiempo (13/08/2010)						 *  
+--*        ACB1 - Adición del key del personal específico para el Gremio 94  30/05/2011                  *  
+--*     MIA0 - Adición del segmento de cliente en base al archivo generado por Marketing 25/12/2011      *            
+--*     MIA0 - Se modifica la lógica de carga para el campo key_id_tip_viv. La lógica está basada en la  *
+--*			   última solicitud aprobada que el cliente tiene registrado en el MIC. (08/05/2012)    	 *
+--*		MIA0 - Adición del registro de error. (04/09/2012)                                               *
+--*     jles - ADICION DATOS DE INFCLIENTES    (08/06/2015)                                              *
+--********************************************************************************************************/            
+/*****************************************************************************************************************
+Fecha Modifiación	: 10/05/2018
+Autor				: BC2258, BC2318
+Cambios Importantes	: Cambio issues linea 853 - Proyecto Migración DWH
+                      Cambio issues linea 1467 - Se agrego el flag de la Dim_Entidad_Financiera tomando aquellas
+					                             que esten vigentes.
+*******************************************************************************************************************/  
+/*****************************************************************************************************************
+Fecha Modifiación	: 02/01/2020
+Autor				: S69570 - PGMA
+Cambios Importantes	: Ampliacion rango ExpirationDate segun la tabla de Activas,
+				      si se mantiene con la misma logica ocasiona problemas los dias lunes (Correccion por Conta Diaria)
+*******************************************************************************************************************/  
+
+            
+---SELECT * FROM BD_DWBCP.Dwh.Dim_cliente ORDER BY c_cic            
+---EXEC [Dwh].[Dim_cliente_CargaDW]            
+/*          
+CONDICIONES A PARTIR DE LA CUAL SE CARGO LA DIM DE CLIENTE CON RESPECTO A LA BANCA            
+EL SEGMENTO DE LA BANCA DEL CLIENTE ESTA FORMADO A PARTIR DE LA COMBINACION DE LOS SIGUIENTES             
+CAMPOS DE LA TBLDBC -- CL_TIPBANCA+CL_SEGBANCA+CL_SUBSEGBANCA+CL_CODBANCA --            
+LA BANCA DEL CLIENTE SE LA HEREDA DEL PERSONAL BCP             
+EL SEGMENTO DE LA DIM DE CLIENTE SE LO OBTIENE DE LA COMBINACION CL_TIPBANCA+CL_SEGBANCA            
+EL SUBSEGMENTO SE LO OBTIENE DE CL_SUBSEGBANCA            
+Y EL STATUS DEL CLIENTE SE LO OBTIENE DE CL_CODBANCA            
+CON ESTA COMBINACION SE PUEDE OBTENER EL SEGMENTO DE LA BANCA DEL CLIENTE DE FORMA COMPLETA            
+c_seg+c_sub_seg+c_sta            
+LAS DESCRIPCIONES SE LOS COLOCARA EN EL DICCIONARIO Y SE LO TOMARA DEL CONCEPTO QUE SE GUARDA             
+EN LA CARGA DEL SEGMENTO Y EL SEGMENTO HISTORICO QUE EXISTE EN EL ODSSIG Y NO ASI             
+DE LA TBLLEXICOS DE REPEXT, DADO QUE EN LA TBLLEXICOS EXISTE EL VALOR KT1N  SE REVISO LA             
+TBLDBC DE PROD DEVOLVIENDO SOLO LOS VALORES CORRESPONDIENTES AL TIPO DE BANCA C  - E   - P              
+POR TANTO SE OMITIRA ESTE DATO PARA LA CARGA DEL DW            
+            
+*/     
+
+ --ALTER INDEX  IDX_DIMCLI_EXPEFE ON BD_DWBCP.Dwh.Dim_cliente
+--DISABLE;
+
+
+/*********************keys  genericos y datos errones*********************************/
+
+PRINT N'Asignacion de keys INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)
+
+DECLARE @genDPERBCP INT            
+SET @genDPERBCP = (SELECT TOP 1 d_prm1 FROM BD_DWBCP.Dwh.Dim_DicDWH WHERE c_cod_tip_dat ='DIMGEN' and d_des_dim ='Dwh.Dim_personal_bcp')    
+
+--Dim_personal_bcp - ERROR MIA0 20120904
+DECLARE @errPERBCP INT
+SET @errPERBCP =  (SELECT TOP 1 d_prm1 FROM BD_DWBCP.Dwh.Dim_DicDWH WHERE c_cod_tip_dat ='DIMERR' and d_des_dim ='Dwh.Dim_personal_bcp')    
+            
+DECLARE @genDCAL SMALLINT            
+SELECT @genDCAL = key_id_cal  FROM BD_DWBCP.Dwh.Dim_calificacion   WHERE c_cal = '99'              
+
+--Dim_calificacion - ERROR MIA0 20120904
+DECLARE @errDCAL SMALLINT
+SET @errDCAL = (SELECT TOP 1 key_id_cal  FROM BD_DWBCP.Dwh.Dim_calificacion WHERE c_cal ='88' AND d_des_cal='ERROR')
+            
+DECLARE @genDCALMAX SMALLINT            
+SELECT @genDCALMAX = key_id_cal  FROM BD_DWBCP.Dwh.Dim_calificacion            
+WHERE c_cal = '99'              
+            
+DECLARE @v_fecha VARCHAR(8)            
+--SET @v_fecha=(SELECT MAX(CL_FECEXTRACCION) FROM BD_STAGEBCP.Repxt.TBLDBC) 
+SET @v_fecha=(SELECT MAX(CA_FECEXTRACCION) FROM BD_STAGEBCP.Repxt.TBLCTAACT)  -- PMA, con esto se amplia el rango de la dim personal bcp para los dias domingos, si se mantiene con la tbldbc hay problemas con respecto a rutina lunes (Cambio Conta Diaria)
+
+--Añadido ZCS0            
+
+DECLARE @genEco INT,            
+  @genEntFin INT            
+SELECT  @genEco =  key_id_act_eco FROM BD_DWBCP.Dwh.Dim_activ_economica WHERE c_act_eco = '99999'    
+
+--Dim_actividad_economica   - ERROR MIA0 20120904
+DECLARE @errEco INT
+SET @errEco = (SELECT key_id_act_eco  FROM  BD_DWBCP.Dwh.Dim_activ_economica   
+                WHERE c_act_eco = '88888' AND c_act_eco_sup_bco = '88888')      
+            
+select @genEntFin=key_id_ent_fin from             
+ BD_DWBCP.Dwh.Dim_entidad_financiera            
+ WHERE c_ncent='999'  AND c_ceent='999' AND c_cod_sis_ban='999999' AND  c_cod_sis_ban='999999'   
+ 
+--Dim_entidad_financiera - ERROR MIA0 20120904 
+DECLARE @errEntFin INT
+SET @errEntFin = (SELECT key_id_ent_fin FROM BD_DWBCP.Dwh.Dim_entidad_financiera
+				WHERE c_ent_fin_sbe = '888888' AND c_cod_sis_ban = '888888' AND d_des_ent_fin = 'ERROR' )
+           
+--Fin ZCS0            
+           
+DECLARE @genTipViv INT        
+         
+select @genTipViv=key_id_tip_viv  
+from BD_DWBCP.Dwh.Dim_tipo_vivienda   WHERE c_tip_viv='999'    
+
+--Dim_tipo_vivienda - ERROR MIA0 20120904 
+DECLARE @errTipViv INT
+SET @errTipViv = (SELECT key_id_tip_viv FROM BD_DWBCP.Dwh.Dim_tipo_vivienda WHERE c_tip_viv='888')    
+
+---nivel educacion  --jle
+DECLARE @v_key_id_niv_edu INT
+  set @v_key_id_niv_edu=(SELECT top 1 key_id_niv_edu FROM BD_DWBCP.Dwh.Dim_nivel_educacion WHERE c_cod_niv_edu='999')   
+  
+DECLARE @v_key_id_niv_edu_e INT
+  set @v_key_id_niv_edu_e = (SELECT top 1 key_id_niv_edu FROM BD_DWBCP.Dwh.Dim_nivel_educacion WHERE c_cod_niv_edu='888')   
+
+--  estado civil --jle
+DECLARE @v_key_id_est_civ INT
+  set @v_key_id_est_civ=(SELECT top 1 key_id_est_civ FROM BD_DWBCP.Dwh.Dim_estado_civil WHERE c_cod_est_civ='999')   
+
+DECLARE @v_key_id_est_civ_e INT
+  set @v_key_id_est_civ_e=(SELECT top 1 key_id_est_civ FROM BD_DWBCP.Dwh.Dim_estado_civil WHERE c_cod_est_civ='888')     
+
+----  situacion laboral --jle
+DECLARE @v_key_id_sit_lab INT
+  set @v_key_id_sit_lab=(SELECT top 1 key_id_sit_lab FROM BD_DWBCP.Dwh.Dim_situacion_laboral WHERE c_cod_sit_lab='999')   
+
+DECLARE @v_key_id_sit_lab_e INT
+  set @v_key_id_sit_lab_e=(SELECT top 1 key_id_sit_lab FROM BD_DWBCP.Dwh.Dim_situacion_laboral WHERE c_cod_sit_lab='888')     
+
+declare @v_key_id_pai smallint
+  set @v_key_id_pai=(SELECT top 1 key_id_pai FROM BD_DWBCP.Dwh.Dim_pais WHERE c_cod_pai='999')   
+
+
+declare @v_key_id_pai_e smallint
+  set @v_key_id_pai_e=(SELECT top 1 key_id_pai FROM BD_DWBCP.Dwh.Dim_pais WHERE c_cod_pai='888')  
+  
+  --SELECT key_id_pai,* FROM BD_DWBCP.Dwh.Dim_pais WHERE c_cod_pai='888'
+
+PRINT N'Asignacion de keys FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)
+
+/********************* fin keys  genericos y datos errones*****************************/
+/********************* ********************************** *****************************/
+
+PRINT N'Tmp_Cliente_complemento_CargaStage  INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','Tmp_Cliente_complemento_CargaStage INI',GETDATE())
+	--Modif. MIA0 20120505 CARGA LA TABLA Dwh.Tmp_Cliente_complemento
+		EXEC Dwh.Tmp_Cliente_complemento_CargaStage		
+	--Modif. MIA0 20120505 
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','Tmp_Cliente_complemento_CargaStage FIN',GETDATE())
+
+PRINT N'EXTRACCION DE DATOS INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)
+
+IF OBJECT_ID('tempdb..#DIM_CLI') is not NULL DROP TABLE #DIM_CLI             
+            
+SELECT              
+0 AS 'key_id_per_bcp',            
+0 AS 'key_id_cal',            
+0 AS 'key_id_cal_max',            
+CONVERT(VARCHAR(12),'') AS 'c_cic',              
+CONVERT(VARCHAR(3),'') AS 'c_nac',             
+CONVERT(VARCHAR(3),'') AS 'c_fin_soc',                       
+CONVERT(VARCHAR(12),'') AS 'c_idc',                             
+CONVERT(VARCHAR(40),'') AS 'd_ape_pat',                                
+CONVERT(VARCHAR(40),'') AS 'd_ape_mat',                                
+CONVERT(VARCHAR(40),'') AS 'd_nom',                              
+CONVERT(VARCHAR(80),'') AS 'd_nom_cli',                                
+CONVERT(VARCHAR(40),'') AS 'd_des_nac',            
+CONVERT(VARCHAR(40),'') AS 'd_des_fin_soc',                             
+CONVERT(VARCHAR(6),'') AS 'c_pri_pro_pas_ape',                                    
+CONVERT(VARCHAR(6),'') AS 'c_pri_pro_act_ape',             
+CONVERT(VARCHAR(8),'') AS 'f_fec_nac',              
+CONVERT(TINYINT,0) AS 'fl_pdh',            
+CONVERT(VARCHAR(2),'') AS 'c_tip_cli',             
+CONVERT(VARCHAR(40),'') AS 'd_des_tip_cli',            
+CONVERT(VARCHAR(3),'') AS 'c_est_civ',             
+CONVERT(VARCHAR(50),'') AS 'd_des_est_civ',     -->modificado a 50 existe descripciones mayores JLE       
+CONVERT(VARCHAR(3),'') AS 'c_ocu',            
+CONVERT(VARCHAR(35),'') AS 'd_des_ocu',            
+CONVERT(VARCHAR(5),'') AS 'c_prf',  -- Este tiene un 999             
+CONVERT(VARCHAR(35),'') AS  'd_des_prf' ,                       
+CONVERT(VARCHAR(1),'') AS 'c_sex',                 
+CONVERT(VARCHAR(15),'') AS 'd_des_sex',            
+CONVERT(VARCHAR(3),'') AS 'c_cod_niv_edu',            
+CONVERT(VARCHAR(30), '') AS 'd_des_cod_niv_edu',            
+CONVERT(VARCHAR(3),'') AS 'c_cod_niv_soc_eco',            
+CONVERT(VARCHAR(20),'') AS 'd_des_cod_niv_soc_eco',            
+CONVERT(VARCHAR(3),'') AS 'c_mag',                  
+CONVERT(VARCHAR(40), '') AS 'd_des_mag',            
+CONVERT(VARCHAR(3),'') AS 'c_sta',            
+CONVERT(VARCHAR(25),'') AS 'd_des_sta',            
+CONVERT(VARCHAR(6),'' ) AS 'c_seg',             
+CONVERT(VARCHAR(40),'') AS 'd_des_seg',            
+CONVERT(VARCHAR(3),'' ) AS 'c_ban',             
+CONVERT(VARCHAR(40),'') AS 'd_des_ban',             
+CONVERT(VARCHAR(5),'' ) AS 'c_sub_seg',            
+CONVERT(VARCHAR(40),'') AS 'd_des_sub_seg',            
+CONVERT(VARCHAR(1),'') AS 'c_tip_per',             
+CONVERT(VARCHAR(20),'') AS 'd_des_tip_per',            
+CONVERT(VARCHAR(1),'') AS 'c_tip_idc',             
+CONVERT(VARCHAR(35),'') AS 'd_des_tip_idc',            
+CONVERT(VARCHAR(12),'')  AS 'd_des_nit',            
+CONVERT(VARCHAR(3),'') AS 'c_ext_idc',             
+CONVERT(VARCHAR(30),'') AS 'd_des_ext_idc',            
+CONVERT(VARCHAR(12),'') AS 'c_mat_ffn',            
+CONVERT(CHAR(1),'') AS 'CL_BANCAFUN', -- Temporal como ayuda a la carda de mat_ffn            
+CONVERT(VARCHAR(3),'') AS 'CL_OFICINA',             
+--CONVERT(VARCHAR(1),'')  AS 'c_cal',                    
+--0  AS 'c_max_cal',                 
+--CONVERT(VARCHAR(30),'') AS 'd_des_cal',            
+'999999' AS 'c_age' ,            
+CONVERT(VARCHAR(5),'') AS 'c_seg_mkt',            
+CONVERT(VARCHAR(35),'') AS 'd_seg_mkt',               
+0 AS 'key_id_ent_fin',     --ZCS0 20110628            
+0 AS 'fl_cdf'            
+-- Modificado por MIA0            
+, CONVERT (SMALLDATETIME, '19000101') AS 'f_fec_reg_bio'            
+--            
+,CONVERT(TINYINT,9)  AS 'fl_est_ibk'           -- MGD0: Flag Estado Cliente - IBK (11-05-2011)            
+,CONVERT(VARCHAR(30),'') AS 'c_ult_usu_ibk'      -- MGD0: Codigo Ultimo Usuario - IBK (11-05-2011)            
+,CONVERT(DATETIME,'19000101') AS 'f_fec_cre_ibk'   -- MGD0: Fecha de Creacion - IBK (11-05-2011)            
+,CONVERT(TINYINT,0) AS 'fl_ibk'             -- MGD0: Flag para identificar cliente IBK - IBK (11-05-2011)            
+,0 AS 'key_id_act_eco'                 --ZCS0 20110620            
+,CONVERT(VARCHAR(9), '') AS 'c_cod_obs'             --ZCS0 20110620            
+,CONVERT(VARCHAR(1), '') AS 'c_est_nit'             --ZCS0 20110620            
+,CONVERT(VARCHAR(8), '') AS 'f_fec_cla_rie_man'           --ZCS0 20110620            
+,CONVERT(VARCHAR(8), '') AS 'f_fec_ult_mod'            --ZCS0 20110620            
+,CONVERT(VARCHAR(60), '') AS 'd_nom_cli_com'            --ZCS0 20110620            
+,CONVERT(VARCHAR(15), '') AS 'c_nro_reg_mer'           --ZCS0 20110620            
+,CONVERT(VARCHAR(1), '') AS 'c_res'              --ZCS0 20110620            
+,CONVERT(VARCHAR(5), '') AS 'c_sec'              --ZCS0 20110620            
+,CONVERT(VARCHAR(1), '') AS 'c_sit'              --ZCS0 20110620            
+,CONVERT(VARCHAR(1), '') AS 'c_sta_elim'            --ZCS0 20110620            
+,CONVERT(VARCHAR(2), '') AS 'c_tip_cla_rie_bcp'           --ZCS0 20110620            
+,CONVERT(VARCHAR(2), '') AS 'c_tip_cla_rie_man'           --ZCS0 20110620            
+,CONVERT(VARCHAR(3), '') AS 'c_cod_cat_emp'            --ZCS0 20110624            
+,CONVERT(VARCHAR(3), '') AS 'c_cod_tip_emp'            --ZCS0 20110624            
+,CONVERT(VARCHAR(2), '') AS 'c_tip_soc'     --ZCS0 20110624            
+,CONVERT(DATETIME,'19000101') AS 'f_fec_des_neg'  -- ZCS0: Fecha de Descargo Archivo Negativo (24-05-2011)            
+,CONVERT(DATETIME,'19000101') AS 'f_fec_ult_ing_neg' -- ZCS0: Fecha de Ultima modificacion de  Archivo Negativo (24-05-2011)            
+,CONVERT(TINYINT,0) AS 'fl_neg'       -- ZCS0: Flag de Clientes que se encuentran en Archivo Negativo  (24-05-2011)           
+ ,CONVERT(VARCHAR(8), '') AS 'f_fec_ing'    --ZCS0 20110926            
+  ,CONVERT(VARCHAR(8), '') AS 'f_fec_cla_rie_bcp'       --ZCS0 20110926          
+  ,1 AS 'key_id_tip_viv'        --ZCS0 20110926  --key_id_tip_viv        
+  ,0 AS 'c_nro_dep'          --ZCS0 20110926  
+  ,0 AS 'key_id_act_eco_sec'  --MIA0 20120131  
+  ,CONVERT(CHAR(4),'9999') AS ACTSECUNDARIA  --MIA0 20120131  
+  ,CONVERT(VARCHAR(1),'9') AS c_est_neg--MOR0 20141013
+  /***************************Ingresamos información de infoclientes JLE***************************/
+  --select * from UsrBD_DWH.Tmp_Cliente_InfoclienteNat
+  --select * from BD_DWBCP.Dwh.Dim_situacion_laboral
+  ,CONVERT(VARCHAR(5),'NID') as c_prf_info 
+  ,CONVERT(VARCHAR(100),'NO ESPECIFICA') as d_des_prf_info 
+  ,CONVERT(VARCHAR(3),'999') as c_cod_niv_edu_info-->se relaciona con la nueva dim de nivel educacion
+  ,CONVERT(VARCHAR(3),'999') as c_est_civ_info  -->se relaciona con la nueva dim de estado civil
+  ---------->aca debe entrar para la nac
+  ,CONVERT(VARCHAR(50),'')   as d_correo_electronico_info
+  ,CONVERT(VARCHAR(50),'')   as d_telefono_info
+  ,CONVERT(VARCHAR(10),'')   as d_celular_info
+  ,CONVERT(VARCHAR(2),'')    as fl_residente_info
+  ,CONVERT(VARCHAR(40),'')   as c_conyugue_idc_info
+  ,CONVERT(VARCHAR(50),'')   as d_conyugue_nombre_info --> SE AMPLIO TAMAÑO 20151005 ERROR JLE
+  ,CONVERT(VARCHAR(50),'')   as d_conyugue_ape_pat_info--> SE AMPLIO TAMAÑO 20151005 ERROR JLE
+  ,CONVERT(VARCHAR(50),'')   as d_conyugue_ape_mat_info--> SE AMPLIO TAMAÑO 20151005 ERROR JLE
+  ,CONVERT(VARCHAR(3),'')    as c_conyugue_nac_info--> se ve si este campo machara con la dim pais
+  ,CONVERT(VARCHAR(2),'')    as fl_conyugue_residente_info
+  ,CONVERT(VARCHAR(100),'')  as d_refpersonal1_nombre_info
+  ,CONVERT(VARCHAR(150),'')  as d_refpersonal1_direccion_info
+  ,CONVERT(VARCHAR(20),'')   as d_refpersonal1_telefono_info
+  ,CONVERT(VARCHAR(100),'')  as d_refpersonal2_nombre_info
+  ,CONVERT(VARCHAR(150),'')  as d_refpersonal2_direccion_info
+  ,CONVERT(VARCHAR(20),'')   as d_refpersonal2_telefono_info
+  ,CONVERT(VARCHAR(100),'')  as d_refpersonal3_nombre_info
+  ,CONVERT(VARCHAR(150),'')  as d_refpersonal3_direccion_info
+  ,CONVERT(VARCHAR(20),'')   as d_refpersonal3_telefono_info
+  ,CONVERT(VARCHAR(100),'')  as d_nombre_emp_info
+  ,CONVERT(VARCHAR(5),'NID')    as c_cargo_info--> MODIFICADO JLE
+  ,CONVERT(VARCHAR(100),'NO ESPECIFICA')  as d_des_cargo_info  
+  ,CONVERT(VARCHAR(100),'')  as d_telefono_emp_info
+  ,CONVERT(VARCHAR(50),'')   as d_correo_electronico_emp_info  
+  ,CONVERT(VARCHAR(2),'')    as fl_fun_publico_info
+  ,CONVERT(VARCHAR(5),'')    as c_ocu_info-->se relaciona con la nueva dim situacion laboral 
+  ,CONVERT(VARCHAR(50),'')   as d_nit_info
+  ,CONVERT(VARCHAR(2),'')    as fl_negocio_propio_info
+  ,CONVERT(VARCHAR(2),'')    as fl_pep_info
+  ,CONVERT(VARCHAR(150),'')  as d_cargo_pep_info
+  ,CONVERT(VARCHAR(20),'')   as d_periodo_pep_info
+  ,CONVERT(VARCHAR(5),'')    as c_nac_info
+  ,@v_key_id_niv_edu   as key_id_niv_edu
+  ,@v_key_id_est_civ   as key_id_est_civ
+  ,@v_key_id_sit_lab   as key_id_sit_lab
+  ,@v_key_id_pai       as key_id_pai
+  ------>nuevos
+  ,CONVERT(VARCHAR(5),'00')  AS d_complemento_idc_info  
+  ,CONVERT(VARCHAR(5),'NID')    AS c_residencia_pais_info
+  ,CONVERT(VARCHAR(10),'')   AS d_fax_info
+  ,CONVERT(VARCHAR(10),'')   AS d_interno_emp_info
+  ,CONVERT(VARCHAR(10),'')   AS d_fec_ingreso_trabajo_info
+  ,CONVERT(VARCHAR(10),'NID')    AS c_actividad_info 
+  ,CONVERT(VARCHAR(150),'NO ESPECIFICA')  AS d_actividad_info-->
+  ,CONVERT(VARCHAR(5),'NID')    AS c_ciiu_info
+  ,CONVERT(VARCHAR(250),'NO ESPECIFICA')  AS d_ciiu_info-->
+  ,CONVERT(DECIMAL(19,4),0)  AS i_salario_info-->
+  ,@v_key_id_pai             AS key_id_pai_res
+   /*******************Fin información de infoclientes JLE******************/
+INTO #DIM_CLI             
+WHERE 1=2            
+            
+--Elimina generico de la TBLDBC         
+DELETE FROM Repxt.TBLDBC WHERE CL_CIC='999999999999' AND CL_IDC='99999999'            
+AND CL_EXTIDC='999' AND CL_TIPIDC='9'            
+-------------------------------------------------------------------------
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','EXTRAE CLIENTES INI',GETDATE())
+         
+INSERT INTO #DIM_CLI            
+SELECT             
+@genDPERBCP AS 'key_id_per_bcp',            
+@genDCAL AS 'key_id_cal',            
+@genDCALMAX AS 'key_id_cal_max',            
+CASE WHEN ISNULL(LTRIM(RTRIM(TBL_DBC.CL_CIC)),'')=''
+  THEN '999999999999'             
+  ELSE TBL_DBC.CL_CIC END  AS 'c_cic',            
+CASE WHEN ISNULL(LTRIM(RTRIM(TBL_DCP.CL_NACIONALIDAD)),'')=''
+  THEN '999'              
+  ELSE RTRIM(TBL_DCP.CL_NACIONALIDAD) END AS 'c_nac',             
+CASE WHEN ISNULL(LTRIM(RTRIM(TBL_DBC.CL_FINSOCIAL)),'')=''
+  THEN '999'             
+  ELSE RTRIM(TBL_DBC.CL_FINSOCIAL) END AS 'c_fin_soc',            
+CASE WHEN ISNULL(RTRIM(TBL_DBC.CL_IDC),'')=''         
+     THEN '99999999'            
+     ELSE RTRIM(TBL_DBC.CL_IDC) END AS 'c_idc',            
+CASE WHEN ISNULL(RTRIM(TBL_DBC.CL_PATCLIENTE),'')=''       
+     THEN 'NID'            
+     ELSE RTRIM(TBL_DBC.CL_PATCLIENTE) END AS 'd_ape_pat',            
+CASE WHEN ISNULL(RTRIM(TBL_DBC.CL_MATCLIENTE),'')=''           
+     THEN 'NID'            
+     ELSE RTRIM(TBL_DBC.CL_MATCLIENTE) END AS 'd_ape_mat',            
+CASE WHEN ISNULL(RTRIM(TBL_DBC.CL_NOMBRECLIENTE),'')=''         
+     THEN 'NID'            
+     ELSE RTRIM(TBL_DBC.CL_NOMBRECLIENTE) END AS 'd_nom',            
+CASE WHEN RTRIM(TBL_DBC.CL_TIPPERSONA) = 'P'             
+ THEN RTRIM(TBL_DBC.CL_PATCLIENTE) + ' ' +  RTRIM(TBL_DBC.CL_MATCLIENTE) + ' ' + RTRIM(TBL_DBC.CL_NOMBRECLIENTE)             
+ ELSE RTRIM(TBL_DBC.CL_NOMCLIENTE) END AS 'd_nom_cli',            
+'NID' AS 'd_des_nac',--CL_NOMCLIENTE            
+'NID' AS 'd_des_fin_soc',--SELECT TOp 10 * FROM Repxt.TBLDBC WHERE CL_TIPPERSONA = 'E'            
+'999999' AS 'c_pri_pro_pas_ape',                                    
+'999999' AS 'c_pri_pro_act_ape',                                    
+CASE WHEN ISNULL(RTRIM(TBL_DBC.CL_FEC01),'')=''
+     THEN '19000101'            
+     ELSE RTRIM(TBL_DBC.CL_FEC01) END AS 'f_fec_nac',            
+CONVERT(TINYINT,9) AS 'fl_pdh',            
+CASE WHEN ISNULL(RTRIM(TBL_DBC.CL_TIPCLIENTE),'')=''
+     THEN '99'            
+     ELSE RTRIM(TBL_DBC.CL_TIPCLIENTE) END AS 'c_tip_cli',            
+'NID' AS 'd_des_tip_cli',            
+CASE WHEN ISNULL(RTRIM(TBL_DCP.CL_ESTCIVIL) ,'')=''
+     THEN '999'            
+     ELSE RTRIM(TBL_DCP.CL_ESTCIVIL) END AS 'c_est_civ',            
+'NID' AS 'd_des_est_civ',            
+CASE WHEN ISNULL(RTRIM(TBL_DCP.CL_SITLABORAL) ,'')=''
+     THEN '999'            
+     ELSE RTRIM(TBL_DCP.CL_SITLABORAL) END AS 'c_ocu',            
+'NID' AS 'd_des_ocu',            
+CASE WHEN ISNULL(RTRIM(TBL_DCP.CL_PROFESION) ,'')=''
+     THEN '99999'            
+     ELSE RTRIM(TBL_DCP.CL_PROFESION) END AS 'c_prf',-- Este tiene un 999             
+'NID' AS 'd_des_prf' ,                       
+CASE WHEN ISNULL(RTRIM(TBL_DCP.CL_SEXO),'')=''
+     THEN '9'            
+     ELSE RTRIM(TBL_DCP.CL_SEXO) END AS 'c_sex',            
+'NID' AS 'd_des_sex',            
+CASE WHEN ISNULL(RTRIM(TBL_DCP.CL_NIVEDUCACION),'')=''
+     THEN '999'            
+     ELSE RTRIM(TBL_DCP.CL_NIVEDUCACION) END AS 'c_cod_niv_edu',            
+'NID' AS 'd_des_cod_niv_edu',            
+CONVERT(VARCHAR(3),'999') AS 'c_cod_niv_soc_eco',            
+'NID' AS 'd_des_cod_niv_soc_eco',            
+CASE WHEN RTRIM(TBL_DBC.CL_MAGNITUD)='' OR TBL_DBC.CL_MAGNITUD IS NULL             
+     THEN '9'             
+     ELSE RTRIM(TBL_DBC.CL_MAGNITUD) END AS 'c_mag',             
+'NID' AS 'd_des_mag',            
+CASE WHEN RTRIM(TBL_DBC.CL_CODBANCA)='' OR TBL_DBC.CL_CODBANCA IS NULL             
+     THEN '999'             
+     ELSE RTRIM(TBL_DBC.CL_CODBANCA) END  AS 'c_sta',            
+'NID' AS 'd_des_sta',            
+CASE WHEN (TBL_DBC.CL_SEGBANCA IS NOT NULL) AND RTRIM(LTRIM(TBL_DBC.CL_SEGBANCA)) <>''             
+  THEN   RTRIM(TBL_DBC.CL_TIPBANCA)+ RTRIM(TBL_DBC.CL_SEGBANCA)               
+  ELSE '999999'  END AS 'c_seg',             
+'NID' AS 'd_des_seg',             
+-- Dado que el cliente tiene su propia banca que es diferente a la del personal bcp se decidio aumentar este campos            
+CASE WHEN RTRIM(TBL_DBC.CL_TIPBANCA)='' OR TBL_DBC.CL_TIPBANCA IS NULL             
+  THEN '999'             
+  ELSE RTRIM(TBL_DBC.CL_TIPBANCA) END AS  'c_ban',             
+'NID' AS 'd_des_ban',             
+CASE WHEN RTRIM(TBL_DBC.CL_SUBSEGBANCA) = '' OR TBL_DBC.CL_SUBSEGBANCA IS NULL             
+  THEN '99999'             
+  ELSE RTRIM(TBL_DBC.CL_SUBSEGBANCA) END AS 'c_sub_seg',            
+'NID' AS 'd_des_sub_seg',            
+ISNULL(CASE TBL_DBC.CL_TIPPERSONA  WHEN 'N' THEN 'P'  WHEN 'J' THEN 'E' ELSE TBL_DBC.CL_TIPPERSONA END,'9') AS 'c_tip_per',             
+'NID' AS 'd_des_tip_per',            
+ISNULL(RTRIM(LTRIM(TBL_DBC.CL_TIPIDC)),'9') AS 'c_tip_idc',             
+'NID' AS 'd_des_tip_idc',            
+--EN el analisis se vio que era necesario cambiar este campo y se añadio            
+CASE WHEN RTRIM(TBL_DBC.CL_RUC) = '' OR TBL_DBC.CL_RUC IS NULL             
+  THEN '999999999999' --TODO:''            
+  ELSE  TBL_DBC.CL_RUC END AS 'd_des_nit',              
+ISNULL(RTRIM(LTRIM(TBL_DBC.CL_EXTIDC)),'999') AS 'c_ext_idc',             
+'NID' AS 'd_des_ext_idc',            
+CASE WHEN RTRIM(TBL_DBC.CL_FUNNEGOCIOS) = '' OR TBL_DBC.CL_FUNNEGOCIOS IS NULL             
+  THEN '999999999999' ELSE RTRIM(TBL_DBC.CL_FUNNEGOCIOS) END AS 'c_mat_ffn',            
+CONVERT(CHAR(1),'') AS 'CL_BANCAFUN', -- Temporal como ayuda a la carga de mat_ffn            
+TBL_DBC.CL_OFICINA AS 'CL_OFICINA', -- Temporal como ayuda a la carda de mat_ffn y tal vez otras de PC            
+CONVERT(INT,999999) AS 'c_age' ,                       
+'99999' AS 'c_seg_mkt',            
+'NID' AS 'd_seg_mkt',              
+ @genEntFin AS 'key_id_ent_fin',    --ZCS0 20110628               
+9 AS 'fl_cdf'             
+-- Modificado por MIA0            
+, CONVERT (SMALLDATETIME, '19000101') AS 'f_fec_reg_bio'              
+--            
+,CONVERT(TINYINT,9) AS 'fl_est_ibk'            -- Añadido por MGD0            
+,'NID' AS 'c_ult_usu_ibk'                 -- Añadido por MGD0            
+,CONVERT (DATETIME, '19000101') AS 'f_fec_cre_ibk'   -- Añadido por MGD0            
+,CONVERT(TINYINT,0) AS 'fl_ibk'              -- Añadido por MGD0            
+, ISNULL(DIMACT.key_id_act_eco, @genEco) AS 'key_id_act_eco'    --ZCS0 20110620            --ZCS0 20110620            
+,CASE WHEN RTRIM(TBL_DBC.CL_CODSBS) = '' OR TBL_DBC.CL_CODSBS IS NULL             
+  THEN 'NID'            
+  ELSE  TBL_DBC.CL_CODSBS END AS 'c_cod_obs'  --ZCS0 20110620            
+  , CASE WHEN RTRIM(TBL_DBC.CL_ESTADONIT) = '' OR TBL_DBC.CL_ESTADONIT IS NULL             
+  THEN '9'            
+  ELSE  TBL_DBC.CL_ESTADONIT END AS 'c_est_nit'  --ZCS0 20110620                     
+,CASE WHEN RTRIM(TBL_DBC.CL_FECCLARIESGOMANUAL) = '' OR TBL_DBC.CL_FECCLARIESGOMANUAL IS NULL             
+  THEN '19000101'            
+  ELSE  TBL_DBC.CL_FECCLARIESGOMANUAL END AS 'f_fec_cla_rie_man'  --ZCS0 20110620              
+,CASE WHEN RTRIM(TBL_DBC.CL_FECULTMODIF) = '' OR TBL_DBC.CL_FECULTMODIF IS NULL             
+  THEN '19000101'            
+  ELSE  TBL_DBC.CL_FECULTMODIF END AS 'f_fec_ult_mod'  --ZCS0 20110620             
+, CASE WHEN RTRIM(TBL_DBC.CL_NOMCOMERCIAL) = '' OR TBL_DBC.CL_NOMCOMERCIAL IS NULL             
+  THEN 'NID'            
+  ELSE  TBL_DBC.CL_NOMCOMERCIAL END AS 'd_nom_cli_com'            
+ , CASE WHEN RTRIM(TBL_DBC.CL_NROREGMERCANTIL) = '' OR TBL_DBC.CL_NROREGMERCANTIL IS NULL             
+ THEN 'NID'            
+ ELSE  TBL_DBC.CL_NROREGMERCANTIL END AS 'c_nro_reg_mer'--ZCS0 20110620            
+  , CASE WHEN RTRIM(TBL_DBC.CL_RESIDENTE) = '' OR TBL_DBC.CL_RESIDENTE IS NULL             
+ THEN '9'            
+ ELSE  TBL_DBC.CL_RESIDENTE END AS 'c_res'  --ZCS0 20110620            
+, CASE WHEN RTRIM(TBL_DBC.CL_SECTOR) = '' OR TBL_DBC.CL_SECTOR IS NULL             
+            
+THEN 'NID'            
+            
+ELSE TBL_DBC.CL_SECTOR END AS 'c_sec'             
+            
+, CASE WHEN RTRIM(TBL_DBC.CL_SITUACION) = '' OR TBL_DBC.CL_SITUACION IS NULL             
+ THEN '9'            
+ ELSE  TBL_DBC.CL_SITUACION END AS 'c_sit'  --ZCS0 20110620             
+ , CASE WHEN RTRIM(TBL_DBC.CL_STAELIMINACION) = '' OR TBL_DBC.CL_STAELIMINACION IS NULL             
+ THEN '9'            
+ ELSE  TBL_DBC.CL_STAELIMINACION END AS 'c_sta_elim'  --ZCS0 20110620             
+ , CASE WHEN RTRIM(TBL_DBC.CL_TIPCLARIESGOBCP) = '' OR TBL_DBC.CL_TIPCLARIESGOBCP IS NULL             
+ THEN '99'            
+ ELSE  TBL_DBC.CL_TIPCLARIESGOBCP END AS 'c_tip_cla_rie_bcp'  --ZCS0 20110620             
+  , CASE WHEN RTRIM(TBL_DBC.CL_TIPCLARIESGOMANUAL) = '' OR TBL_DBC.CL_TIPCLARIESGOMANUAL IS NULL             
+ THEN '99'            
+ ELSE  TBL_DBC.CL_TIPCLARIESGOMANUAL END AS 'c_tip_cla_rie_man'  --ZCS0 20110620             
+ , CASE WHEN RTRIM(TBL_DCE.CL_CATEGORIA) = '' OR TBL_DCE.CL_CATEGORIA IS NULL             
+ THEN '999'            
+ ELSE  TBL_DCE.CL_CATEGORIA END AS 'c_cod_cat_emp'  --ZCS0 20110624            
+  , CASE WHEN RTRIM(TBL_DCE.CL_TIPEMPRESA) = '' OR TBL_DCE.CL_TIPEMPRESA IS NULL             
+ THEN '999'            
+ ELSE  TBL_DCE.CL_TIPEMPRESA END AS 'c_cod_tip_emp'  --ZCS0 20110624            
+  , CASE WHEN RTRIM(TBL_DCE.CL_TIPSOCIEDAD) = '' OR TBL_DCE.CL_TIPSOCIEDAD IS NULL             
+ THEN '99'            
+ ELSE  TBL_DCE.CL_TIPSOCIEDAD END AS 'c_tip_soc'  --ZCS0 20110624            
+ ,CONVERT(DATETIME,'19000101') AS 'f_fec_des_neg'    -- Añadido ZCS0            
+,CONVERT(DATETIME,'19000101') AS 'f_fec_ult_ing_neg'   -- Añadido ZCS0            
+,CONVERT(TINYINT,0) AS 'fl_neg'         -- Añadido ZCS0          
+  ,CASE WHEN RTRIM(TBL_DBC.CL_FECINGRESO ) = '' OR TBL_DBC.CL_FECINGRESO IS NULL             
+  THEN '19000101'            
+  ELSE  TBL_DBC.CL_FECINGRESO END AS 'f_fec_ing'  --ZCS0 20110620           
+  ,CASE WHEN RTRIM(TBL_DBC.CL_FECCLARIESGOBCP) = '' OR TBL_DBC.CL_FECCLARIESGOBCP IS NULL             
+  THEN '19000101'            
+  ELSE  TBL_DBC.CL_FECCLARIESGOBCP END AS 'f_fec_cla_rie_bcp'  --ZCS0 20110620           
+   ,@genTipViv AS 'key_id_tip_viv'       --ZCS0 20110926  --key_id_tip_viv        
+  ,0 AS 'c_nro_dep'         
+  , @genEco AS 'key_id_act_eco_sec' --MIA0 20120131  
+  , TBL_DCP.CL_ACTSECUNDARIA AS 'ACTSECUNDARIA'  --MIA0 20120131   
+  ,CONVERT(VARCHAR(1),'9') AS c_est_neg--MOR0 20141013  
+  /***************************Ingresamos información de infoclientes JLE***************************/
+  --select * from UsrBD_DWH.Tmp_Cliente_InfoclienteNat
+  --select * from BD_DWBCP.Dwh.Dim_situacion_laboral
+  ,CONVERT(VARCHAR(5),'NID') as c_prf_info 
+  ,CONVERT(VARCHAR(100),'NO ESPECIFICA') as d_des_prf_info 
+  ,CONVERT(VARCHAR(3),'999') as c_cod_niv_edu_info-->se relaciona con la nueva dim de nivel educacion
+  ,CONVERT(VARCHAR(3),'999') as c_est_civ_info  -->se relaciona con la nueva dim de estado civil  
+  ---------->aca debe entrar para la nac
+  ,CONVERT(VARCHAR(50),'')   as d_correo_electronico_info
+  ,CONVERT(VARCHAR(50),'')   as d_telefono_info
+  ,CONVERT(VARCHAR(10),'')   as d_celular_info
+  ,CONVERT(VARCHAR(2),'')    as fl_residente_info
+  ,CONVERT(VARCHAR(40),'')   as c_conyugue_idc_info
+  ,CONVERT(VARCHAR(50),'')   as d_conyugue_nombre_info--> SE AMPLIO TAMAÑO 20151005 ERROR JLE
+  ,CONVERT(VARCHAR(50),'')   as d_conyugue_ape_pat_info--> SE AMPLIO TAMAÑO 20151005 ERROR JLE
+  ,CONVERT(VARCHAR(50),'')   as d_conyugue_ape_mat_info--> SE AMPLIO TAMAÑO 20151005 ERROR JLE
+  ,CONVERT(VARCHAR(3),'')    as c_conyugue_nac_info--> se ve si este campo machara con la dim pais
+  ,CONVERT(VARCHAR(2),'')    as fl_conyugue_residente_info
+  ,CONVERT(VARCHAR(100),'')  as d_refpersonal1_nombre_info
+  ,CONVERT(VARCHAR(150),'')  as d_refpersonal1_direccion_info
+  ,CONVERT(VARCHAR(20),'')   as d_refpersonal1_telefono_info
+  ,CONVERT(VARCHAR(100),'')  as d_refpersonal2_nombre_info
+  ,CONVERT(VARCHAR(150),'')  as d_refpersonal2_direccion_info
+  ,CONVERT(VARCHAR(20),'')   as d_refpersonal2_telefono_info
+  ,CONVERT(VARCHAR(100),'')  as d_refpersonal3_nombre_info
+  ,CONVERT(VARCHAR(150),'')  as d_refpersonal3_direccion_info
+  ,CONVERT(VARCHAR(20),'')   as d_refpersonal3_telefono_info
+  ,CONVERT(VARCHAR(100),'')  as d_nombre_emp_info
+  ,CONVERT(VARCHAR(5),'NID')    as c_cargo_info--<MODIFICADO
+  ,CONVERT(VARCHAR(100),'NO ESPECIFICA')  as d_des_cargo_info  
+  ,CONVERT(VARCHAR(100),'')  as d_telefono_emp_info
+  ,CONVERT(VARCHAR(50),'')   as d_correo_electronico_emp_info  
+  ,CONVERT(VARCHAR(2),'')    as fl_fun_publico_info
+  ,CONVERT(VARCHAR(5),'')    as c_ocu_info-->se relaciona con la nueva dim situacion laboral 
+  ,CONVERT(VARCHAR(50),'')   as d_nit_info
+  ,CONVERT(VARCHAR(2),'')    as fl_negocio_propio_info
+  ,CONVERT(VARCHAR(2),'')    as fl_pep_info
+  ,CONVERT(VARCHAR(150),'')  as d_cargo_pep_info
+  ,CONVERT(VARCHAR(20),'')   as d_periodo_pep_info
+  ,CONVERT(VARCHAR(5),'')    as c_nac_info--> para la nacionalidad con la dim pais
+  ,@v_key_id_niv_edu   as key_id_niv_edu
+  ,@v_key_id_est_civ   as key_id_est_civ
+  ,@v_key_id_sit_lab   as key_id_sit_lab
+  ,@v_key_id_pai       as key_id_pai
+  ------>nuevos
+  ,CONVERT(VARCHAR(5),'00')  AS d_complemento_idc_info  
+  ,CONVERT(VARCHAR(5),'NID')    AS c_residencia_pais_info
+  ,CONVERT(VARCHAR(10),'')   AS d_fax_info
+  ,CONVERT(VARCHAR(10),'')   AS d_interno_emp_info
+  ,CONVERT(VARCHAR(10),'')   AS d_fec_ingreso_trabajo_info
+  ,CONVERT(VARCHAR(10),'NID')    AS c_actividad_info 
+  ,CONVERT(VARCHAR(150),'NO ESPECIFICA')  AS d_actividad_info-->
+  ,CONVERT(VARCHAR(5),'NID')    AS c_ciiu_info--> MODIFICADO
+  ,CONVERT(VARCHAR(250),'NO ESPECIFICA')  AS d_ciiu_info-->MODIFICADO
+  ,CONVERT(DECIMAL(19,4),0)  AS i_salario_info-->
+  ,@v_key_id_pai       as key_id_pai_res
+  /*******************Fin información de infoclientes JLE******************/  
+FROM Repxt.TBLDBC TBL_DBC             
+LEFT OUTER JOIN Repxt.TBLDCP TBL_DCP               
+ON TBL_DBC.CL_CIC = TBL_DCP.CL_CIC             
+LEFT OUTER JOIN Repxt.TBLDCE TBL_DCE             
+ON TBL_DBC.CL_CIC = TBL_DCE.CL_CIC            
+LEFT OUTER  JOIN BD_DWBCP.Dwh.Dim_activ_economica DIMACT  --ZCS0 20110620            
+ON CL_ACTECONOMICA = c_act_eco      
+
+PRINT N'EXTRACCION DE DATOS FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)         
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','EXTRAE CLIENTES FIN',GETDATE())
+
+--MIA0 20120131  
+
+UPDATE #DIM_CLI SET  key_id_act_eco_sec = ISNULL(A.key_id_act_eco, @genEco)  
+FROM #DIM_CLI C INNER JOIN BD_DWBCP.Dwh.Dim_activ_economica A  
+ON LTRIM(RTRIM(C.ACTSECUNDARIA)) = LTRIM(RTRIM(A.c_act_eco))  
+
+
+SELECT TOP 100 * FROM BD_STAGEBCP.InfoCli.INFO_CLIENTE
+WHERE LTRIM(RTRIM(PATERNO)) LIKE '%NUNEZ%'
+AND CIC NOT LIKE '%FIC%'
+
+select TOP 100 * from BD_STAGEBCP.InfoCli.INFO_DATOPERSONAL A
+INNER JOIN BD_STAGEBCP.InfoCli.INFO_CLIENTE B
+ON A.CLIENTE_ID = B.CLIENTE_ID
+RIGHT JOIN BD_STAGEBCP.Repxt.TBLDCP C
+ON C.CL_CIC = B.CIC
+where CIC NOT LIKE '%FIC%'
+AND NACIONALIDAD_ID = 1
+AND C.CL_NACIONALIDAD <> ''
+ORDER BY B.FECHA_CREACION DESC
+
+select NACIONALIDAD_ID,count(1)
+from BD_STAGEBCP.InfoCli.INFO_DATOPERSONAL
+group by NACIONALIDAD_ID order by 2 desc
+
+select * from BD_STAGEBCP.InfoCli.INFO_PARAMETRO 
+where CODIGO = 'NACIONALIDAD'
+
+
+
+SELECT * FROM BD_STAGEBCP.Repxt.TBLDBC
+WHERE CL_CIC = '    00559084'
+
+---------------------------------------------------------------------------------------------------------------------------
+-- INICIO SECCION DEDICADA A INFORMACION DE INFOCLIENTES
+---------------------------------------------------------------------------------------------------------------------------
+
+PRINT N'ACTUALIZACION INFORMACION DE INFOCLIENTES INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126) 
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','ACTUALIZACION INFOCLIENTES INI',GETDATE())
+
+/*1. Para el campo ocupacion mandatorio Información de InfoCLientes****/
+
+UPDATE DIM_CLI 
+SET 
+   DIM_CLI.c_prf_info = NAT.c_prf
+  ,DIM_CLI.d_des_prf_info = NAT.d_des_prf
+  ,DIM_CLI.c_cod_niv_edu_info = NAT.c_cod_niv_edu
+  ,DIM_CLI.c_est_civ_info = NAT.c_est_civ
+  ,DIM_CLI.d_correo_electronico_info = SUBSTRING(NAT.d_correo_electronico,1,50)  --ERROR STRING TRUNCATED
+  ,DIM_CLI.d_telefono_info = NAT.d_telefono
+  ,DIM_CLI.d_celular_info = NAT.d_celular
+  ,DIM_CLI.fl_residente_info = NAT.fl_residente_cdp
+  ,DIM_CLI.c_conyugue_idc_info = NAT.c_conyugue_idc
+  ,DIM_CLI.d_conyugue_nombre_info = NAT.d_conyugue_nombre
+  ,DIM_CLI.d_conyugue_ape_pat_info = NAT.d_conyugue_ape_pat
+  ,DIM_CLI.d_conyugue_ape_mat_info = NAT.d_conyugue_ape_mat
+  ,DIM_CLI.c_conyugue_nac_info = NAT.c_conyugue_nac
+  ,DIM_CLI.fl_conyugue_residente_info = NAT.fl_conyugue_residente
+  ,DIM_CLI.d_refpersonal1_nombre_info = NAT.d_refpersonal1_nombre
+  ,DIM_CLI.d_refpersonal1_direccion_info = NAT.d_refpersonal1_direccion
+  ,DIM_CLI.d_refpersonal1_telefono_info = NAT.d_refpersonal1_telefono
+  ,DIM_CLI.d_refpersonal2_nombre_info = NAT.d_refpersonal2_nombre
+  ,DIM_CLI.d_refpersonal2_direccion_info = NAT.d_refpersonal2_direccion
+  ,DIM_CLI.d_refpersonal2_telefono_info = NAT.d_refpersonal2_telefono
+  ,DIM_CLI.d_refpersonal3_nombre_info = NAT.d_refpersonal3_nombre
+  ,DIM_CLI.d_refpersonal3_direccion_info = NAT.d_refpersonal3_direccion
+  ,DIM_CLI.d_refpersonal3_telefono_info = NAT.d_refpersonal3_telefono
+  ,DIM_CLI.d_nombre_emp_info = NAT.d_nombre_emp
+  ,DIM_CLI.c_cargo_info = NAT.c_cargo
+  ,DIM_CLI.d_des_cargo_info = NAT.d_des_cargo
+  ,DIM_CLI.d_telefono_emp_info = NAT.d_telefono_emp
+  ,DIM_CLI.d_correo_electronico_emp_info = NAT.d_correo_electronico_emp  
+  ,DIM_CLI.fl_fun_publico_info = NAT.fl_fun_publico
+  ,DIM_CLI.c_ocu_info = NAT.c_ocu 
+  ,DIM_CLI.d_nit_info = NAT.d_nit
+  ,DIM_CLI.fl_negocio_propio_info = NAT.fl_negocio_propio
+  ,DIM_CLI.fl_pep_info = NAT.fl_pep
+  ,DIM_CLI.d_cargo_pep_info = NAT.d_cargo_pep
+  ,DIM_CLI.d_periodo_pep_info = NAT.d_periodo_pep
+  ,DIM_CLI.c_nac_info=NAT.c_nac
+    ------>nuevos
+  ,DIM_CLI.d_complemento_idc_info= NAT.d_complemento_idc_info 
+  ,DIM_CLI.c_residencia_pais_info =NAT.c_residencia_pais_info
+  ,DIM_CLI.d_fax_info =NAT.d_fax_info
+  ,DIM_CLI.d_interno_emp_info =NAT.d_interno_empresa_info
+  ,DIM_CLI.d_fec_ingreso_trabajo_info =NAT.d_fec_ingreso_trabajo_info
+  ,DIM_CLI.c_actividad_info =NAT.c_actividad
+  ,DIM_CLI.d_actividad_info =NAT.d_actividad-->
+  ,DIM_CLI.c_ciiu_info =NAT.c_ciiu
+  ,DIM_CLI.d_ciiu_info =NAT.d_ciiu-->
+  ,DIM_CLI.i_salario_info =NAT.i_salario-->
+FROM #DIM_CLI DIM_CLI  
+JOIN UsrBD_DWH.Tmp_Cliente_InfoclienteNat NAT
+ON (DIM_CLI.c_cic=NAT.c_cic )
+
+/*****actualizamos el key_id del nivel educacion*******/
+update DIM_CLI set DIM_CLI.key_id_niv_edu= ISNULL(NIVEDU.key_id_niv_edu, @v_key_id_niv_edu_e)
+FROM #DIM_CLI  DIM_CLI
+left join BD_DWBCP.Dwh.Dim_nivel_educacion NIVEDU
+on (DIM_CLI.c_cod_niv_edu_info=NIVEDU.c_cod_niv_edu)
+
+
+/*****actualizamos el key_id del estado civil*******/
+update DIM_CLI set DIM_CLI.key_id_est_civ= ISNULL(ESTCIV.key_id_est_civ, @v_key_id_est_civ_e)
+FROM #DIM_CLI  DIM_CLI
+left join BD_DWBCP.Dwh.Dim_estado_civil ESTCIV
+on (DIM_CLI.c_est_civ_info=ESTCIV.c_cod_est_civ)
+
+
+/*****actualizamos el key_id del estado civil*******/
+update DIM_CLI set DIM_CLI.key_id_sit_lab = ISNULL(SITLAB.key_id_sit_lab, @v_key_id_sit_lab_e)
+FROM #DIM_CLI  DIM_CLI
+left join BD_DWBCP.Dwh.Dim_situacion_laboral SITLAB
+on (DIM_CLI.c_ocu_info=SITLAB.c_cod_sit_lab)
+
+
+/*****actualizamos el key_id de la nacionalidad*******/
+update DIM_CLI set DIM_CLI.key_id_pai = ISNULL(PAI.key_id_pai, @v_key_id_pai_e)
+FROM #DIM_CLI  DIM_CLI
+left join  BD_DWBCP.Dwh.Dim_pais PAI
+on (DIM_CLI.c_nac_info=PAI.c_cod_pai)
+
+
+/*****actualizamos el key_id de la pais de residencia*******/
+update DIM_CLI set DIM_CLI.key_id_pai_res = ISNULL(PAI.key_id_pai, @v_key_id_pai_e)-->observación Merycilla
+FROM #DIM_CLI  DIM_CLI
+left join  BD_DWBCP.Dwh.Dim_pais PAI
+on (DIM_CLI.c_residencia_pais_info=PAI.c_cod_pai)
+
+
+PRINT N'ACTUALIZACION INFORMACION DE INFOCLIENTES FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126) 
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','ACTUALIZACION INFOCLIENTES FIN',GETDATE())
+
+---------------------------------------------------------------------------------------------------------------------------
+-- FIN SECCION DEDICADA A INFORMACION DE INFOCLIENTES
+---------------------------------------------------------------------------------------------------------------------------
+            
+			              
+PRINT N'ACTUALIZACION DICCIONARIO INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126) 
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','ACTUALIZACION DICCIONARIO INI',GETDATE())
+   IF OBJECT_ID('tempdb..#Dim_DicDWH_CLI') is not NULL DROP TABLE #Dim_DicDWH_CLI
+ 
+SELECT 
+RTRIM(LTRIM(c_cod_fue)) as c_cod_fue
+,RTRIM(LTRIM(c_cod_tip_dat)) as c_cod_tip_dat
+,RTRIM(LTRIM(d_des_cod)) AS d_des_cod
+--INTO #Dim_DicDWH_CLI
+FROM BD_DWBCP.Dwh.Dim_DicDWH
+WHERE d_des_dim='Dim_cliente'
+
+/******CREACION DE UN INDICE PARA AGILIZAR LOS UPDATES******/
+CREATE INDEX idx_tmp_Dim_DicDWH_CLI ON #Dim_DicDWH_CLI(c_cod_tip_dat)
+/******CREACION DE UN INDICE PARA AGILIZAR LOS UPDATES******/
+
+    UPDATE #DIM_CLI            
+    SET d_des_nac =ISNULL(NAC.d_des_cod,'NID')
+		,d_des_fin_soc=ISNULL(FIN.d_des_cod,'NID')
+		,d_des_tip_cli=TIP_CLI.d_des_cod
+		,d_des_ocu=OCU.d_des_cod
+		,d_des_cod_niv_edu=EDU.d_des_cod
+		,d_des_mag=MAG_EMP.d_des_cod
+		,d_des_sta=STA.d_des_cod
+		,d_des_ban=TIPBAN.d_des_cod
+		,d_des_seg=SEG.d_des_cod				
+    FROM #DIM_CLI CLI
+    LEFT JOIN #Dim_DicDWH_CLI NAC ON (CLI.c_nac = NAC.c_cod_fue AND NAC.c_cod_tip_dat = 'NACIONALID' )
+    LEFT JOIN #Dim_DicDWH_CLI FIN ON (CLI.c_fin_soc = FIN.c_cod_fue AND FIN.c_cod_tip_dat = 'FINSOCIAL')
+    LEFT JOIN #Dim_DicDWH_CLI TIP_CLI ON (CLI.c_tip_cli = TIP_CLI.c_cod_fue AND TIP_CLI.c_cod_tip_dat = 'TIPCLIENTE')
+    LEFT JOIN #Dim_DicDWH_CLI OCU ON (CLI.c_ocu = OCU.c_cod_fue AND OCU.c_cod_tip_dat = 'OCUPACION')
+    LEFT JOIN #Dim_DicDWH_CLI EDU ON (CLI.c_cod_niv_edu = EDU.c_cod_fue AND EDU.c_cod_tip_dat = 'NIVEDU')--30
+    LEFT JOIN #Dim_DicDWH_CLI MAG_EMP ON (CLI.c_mag = MAG_EMP.c_cod_fue AND MAG_EMP.c_cod_tip_dat = 'MAGEMPRESA')
+    LEFT JOIN #Dim_DicDWH_CLI STA ON (CLI.c_sta = STA.c_cod_fue AND STA.c_cod_tip_dat = 'STATUS')
+    LEFT JOIN #Dim_DicDWH_CLI TIPBAN ON (CLI.c_ban = TIPBAN.c_cod_fue AND TIPBAN.c_cod_tip_dat = 'TIPBAN')--39
+    LEFT JOIN #Dim_DicDWH_CLI SEG ON (CLI.c_seg = SEG.c_cod_fue AND SEG.c_cod_tip_dat = 'SEG')
+
+
+PRINT N'ACTUALIZACION DICCIONARIO FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126) 
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','ACTUALIZACION DICCIONARIO FIN',GETDATE())
+
+PRINT N'ACTUALIZACION DICCIONARIO INI 1  ' + CONVERT(NVARCHAR(23),GETDATE(),126) 
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','ACTUALIZACION DICCIONARIO 1 INI',GETDATE())
+
+--L. COMPLETANDO LA DESCRIPCION DEL SUBSEGMENTO            
+ IF OBJECT_ID('tempdb..#TMPDICSSE') is not NULL DROP TABLE #TMPDICSSE            
+    SELECT c_cod_fue , SUBSTRING(d_des_cod,1,40) AS DESCRIP             
+    INTO #TMPDICSSE            
+    FROM BD_DWBCP.Dwh.Dim_DicDWH             
+    WHERE d_des_dim = 'Dim_cliente' AND c_cod_tip_dat = 'SUBSEG'             
+                
+	 UPDATE #DIM_CLI            
+	 SET d_des_sub_seg = DIC.DESCRIP             
+	 FROM #TMPDICSSE DIC 
+	 WHERE #DIM_CLI.c_sub_seg = DIC.c_cod_fue            
+              
+            
+--P. COMPLETANDO LA DESCRIPCION DE EXTENSION IDC            
+ IF OBJECT_ID('tempdb..#TMPDICEXT') is not NULL DROP TABLE #TMPDICEXT            
+    SELECT c_cod_fue , SUBSTRING(d_des_cod,1,40) AS DESCRIP             
+    INTO #TMPDICEXT            
+    FROM BD_DWBCP.Dwh.Dim_DicDWH             
+    WHERE d_des_dim = 'Dim_cliente' AND c_cod_tip_dat = 'EXTIDC'            
+            
+ UPDATE #DIM_CLI            
+ SET d_des_ext_idc = DIC.DESCRIP             
+ --SELECT CLI.c_ext_idc, CLI.d_des_ext_idc, DIC.c_cod_fue, DIC.d_des_cod            
+ FROM #TMPDICEXT DIC 
+ WHERE #DIM_CLI.c_ext_idc = DIC.c_cod_fue            
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','ACTUALIZACION DICCIONARIO 1 FIN',GETDATE())
+
+PRINT N'ACTUALIZACION DICCIONARIO FIN 1 ' + CONVERT(NVARCHAR(23),GETDATE(),126) 
+
+
+PRINT N'ACTUALIZACION CODPROFE INI 1 ' + CONVERT(NVARCHAR(23),GETDATE(),126) 
+   
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','ACTUALIZACION CODPROFE INI',GETDATE())
+             
+ IF OBJECT_ID('tempdb..#TMPDICOCU') is not NULL DROP TABLE #TMPDICOCU             
+--F. COMPLETANDO LA DESCRIPCION DE PROFESION            
+ UPDATE #DIM_CLI            
+ SET d_des_prf = CONVERT(VARCHAR(35), LEX.LX_DESC_LARGA)              
+ FROM  BD_STAGEBCP.Repxt.TBLLEXICOS LEX                
+ WHERE LEX.LX_TIPOLEX = 'CODPROFE'             
+ and c_prf = LEX.LX_CODIGO_BCR          
+            
+PRINT N'ACTUALIZACION CODPROFE FIN 1 ' + CONVERT(NVARCHAR(23),GETDATE(),126) 
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','ACTUALIZACION CODPROFE FIN',GETDATE())
+
+ 
+ PRINT N'EXTRACCION DATOS TBLCTAACT INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)            
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','TBLCTAACT INI',GETDATE())
+          
+ IF OBJECT_ID('tempdb..#TMPDICEXT') is not NULL DROP TABLE #TMPDICEXT            
+           
+--Q. CALCULA PRIMER PRODUCTO APERTURADO CON LA TBLCTAACT Lógica de [dbo].[sp_PC_CARGA_LCL_MAECLIENTE]             
+/******************ACTUALIZADA LO LÓGICA JLE*****************/             
+ IF OBJECT_ID('tempdb..#TACT1') is not NULL DROP TABLE #TACT1            
+SELECT CA_PRODUCTO,CA_CIC, CA_FECINICIO,ROWNUMBER
+ INTO #TACT1            
+FROM (             
+SELECT A.CA_PRODUCTO, A.CA_CIC, A.CA_FECINICIO            
+   ,ROW_NUMBER()OVER(PARTITION BY A.CA_CIC ORDER BY CA_FECINICIO, CA_PRODUCTO DESC) AS ROWNUMBER
+
+ FROM Repxt.TBLCTAACT A          
+ ) AS TPAS
+WHERE ROWNUMBER=1
+                          
+            
+ UPDATE #DIM_CLI            
+ SET  c_pri_pro_act_ape=ISNULL(substring(rtrim(ltrim(CA_PRODUCTO)),1,6),'999999')                   
+ FROM #TACT1             
+ WHERE CA_CIC=#DIM_CLI.c_cic     
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','TBLCTAACT FIN',GETDATE())
+            
+PRINT N'EXTRACCION DATOS TBLCTAACT FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)     
+
+
+PRINT N'EXTRACCION DATOS TBLCTAPAS INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                           
+--R. CALCULA PRIMER PRODUCTO APERTURADO PASIVO Lógica de [dbo].[sp_PC_CARGA_LCL_MAECLIENTE]  
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','TBLCTAPAS INI',GETDATE())
+           
+/******************ACTUALIZADA LA LÓGICA JLE*****************/            
+  IF OBJECT_ID('tempdb..#TPAS1') is not NULL DROP TABLE #TPAS1            
+SELECT CP_PRODUCTO,CP_CIC, CP_FECAPERTU,ROWNUMBER
+ INTO #TPAS1            
+FROM (             
+SELECT A.CP_PRODUCTO, A.CP_CIC, A.CP_FECAPERTU            
+   ,ROW_NUMBER()OVER(PARTITION BY A.CP_CIC ORDER BY CP_FECAPERTU, CP_PRODUCTO DESC) AS ROWNUMBER
+
+ FROM Repxt.TBLCTAPAS A          
+ ) AS TPAS
+WHERE ROWNUMBER=1
+
+--------------------------------                         
+ UPDATE #DIM_CLI            
+ SET c_pri_pro_pas_ape=ISNULL(CP_PRODUCTO,'999999')
+ FROM #TPAS1            
+ WHERE CP_CIC=#DIM_CLI.c_cic
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','TBLCTAPAS FIN',GETDATE())
+
+PRINT N'EXTRACCION DATOS TBLCTAPAS FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                           
+                    
+
+--------------------------------------------------------------------------------------------------------->hasta aca 14 min --ahora 18 min      
+   --U. COMPLETANDO LA MATRICULA DEL FUNCIONARIO               
+            
+ --  Corrige el campo CL_FUNNEGOCIO cuando no encuentra relación con la tabla Repxt.TBLFUNNEG.             
+
+PRINT N'FFNN INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)   
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','FFNN INI',GETDATE())                        
+       
+  IF OBJECT_ID('tempdb..#TBLDBC_ANSWER') is not NULL DROP TABLE #TBLDBC_ANSWER             
+              
+ --Actualizo el campo nuevo banca del funcionario con ayuda de la tabla Repxt.TBLFUNNEG.              
+          
+  UPDATE #DIM_CLI SET CL_BANCAFUN = FN_BANCA              
+  FROM  #DIM_CLI A
+  INNER JOIN Repxt.TBLFUNNEG B ON (A.c_mat_ffn = B.FN_FUNNEGOCIO)            
+             
+ --Actualiza el campo nuevo banca del funcionario con la letra P - cuando esta tiene la letra D.              
+  ---Actualizar Personal BCP              
+            
+ UPDATE #DIM_CLI            
+ SET key_id_per_bcp =  ISNULL(B.key_id_per_bcp,@genDPERBCP)            
+ FROM #DIM_CLI A LEFT OUTER JOIN BD_DWBCP.Dwh.Dim_personal_bcp B            
+ ON LTRIM(RTRIM(A.c_mat_ffn))= LTRIM(RTRIM(B.c_mat))   --MIA0 20120917          
+ AND (@v_fecha>=B.EffectiveDate AND @v_fecha<=B.ExpirationDate)            
+            
+PRINT N'FFNN FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                           
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','FFNN FIN',GETDATE())                        
+            
+--V. COMPLETANDO LA CALIFICACION DEL CLIENTE : CODIGO DE LA CALIFIACION DEL CLIENTE            
+--- Actualizacion de los Keys para Calificaciones            
+
+PRINT N'CALIFICACION INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                           
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','CALIFICACION INI',GETDATE())                        
+            
+IF OBJECT_ID('tempdb..#CALIF') is not NULL DROP TABLE #CALIF             
+ SELECT             
+ CONVERT(VARCHAR(12),'') AS 'PO_CIC',            
+ CONVERT(CHAR(1),'') AS 'PO_CALCENTRAL'            
+ INTO #CALIF             
+ WHERE 1=2            
+            
+ --TRUNCATE TABLE #CALIF             
+            
+ INSERT INTO #CALIF             
+ SELECT  PO_CIC, MAX(PO_CALCENTRAL) AS PO_CALCENTRAL            
+ FROM BD_STAGEBCP.Repxt.TBXPREOPR             
+ GROUP BY PO_CIC            
+             
+ UPDATE #DIM_CLI             
+ SET key_id_cal = DCAL.key_id_cal             
+ FROM #DIM_CLI CLI             
+ INNER JOIN #CALIF CAL ON CLI.c_cic = CAL.PO_CIC             
+ INNER JOIN BD_DWBCP.Dwh.Dim_calificacion DCAL ON DCAL.c_cal = CAL.PO_CALCENTRAL             
+             
+             
+IF OBJECT_ID('tempdb..#SAPCIR_PRO') is not NULL DROP TABLE #SAPCIR_PRO            
+ SELECT             
+ CONVERT(VARCHAR(12),'') AS 'CIC',            
+ CONVERT (VARCHAR(12),'') AS 'IDC',            
+ CONVERT (INT,0) AS 'CALIFICACION'            
+ INTO #SAPCIR_PRO            
+ WHERE 1=2            
+ --TRUNCATE TABLE #SAPCIR_PRO            
+            
+ INSERT INTO #SAPCIR_PRO            
+ SELECT CDR_CIC, SAPCIRPRO.IDC, MAX(SAPCIRPRO.CALIFICACION)             
+ FROM SCirc.TDE_SAPCIRCPRODUCTOS SAPCIRPRO            
+ LEFT OUTER JOIN( SELECT  TBL_DBC.CL_CIC AS 'CDR_CIC'            
+       ,CAST(CAST(TBL_DBC.CL_IDC AS INT) AS NVARCHAR)            
+       + CASE WHEN TBL_DBC.CL_TIPIDC IN ('Y','Z') THEN 'BCR'            
+        ELSE RTRIM(TBL_DBC.CL_EXTIDC)            
+        END AS 'IDCCDR'            
+      FROM   Repxt.TBLDBC TBL_DBC            
+      WHERE CL_IDC<>'0MMH0066'            
+      AND ISNUMERIC(CL_IDC)  = 1            
+      ) AS T1 ON IDC=IDCCDR            
+ GROUP BY CDR_CIC,IDC            
+          
+ UPDATE #DIM_CLI          
+ SET            
+ --c_max_cal=ISNULL(CALIFICACION,0)            
+ key_id_cal_max= ISNULL(DCAL.key_id_cal,@genDCALMAX)            
+ FROM #DIM_CLI CLI             
+ LEFT OUTER JOIN #SAPCIR_PRO SAPCIRC ON CLI.c_cic=SAPCIRC.CIC            
+ LEFT JOIN BD_DWBCP.Dwh.Dim_calificacion DCAL ON DCAL.c_cal = convert(varchar,ISNULL(CALIFICACION,0))            
+
+PRINT N'CALIFICACION FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                           
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','CALIFICACION FIN',GETDATE())                        
+
+PRINT N'AGENCIA INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                           
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','AGENCIA INI',GETDATE())                        
+      ----REPLANTEADO JLE ----------      
+ UPDATE #DIM_CLI            
+ SET c_age=CASE WHEN  PATINDEX('%[1-9]%', CL_OFICINA)=1
+              THEN SUBSTRING(CL_OFICINA,1,1)+'01'+CL_OFICINA
+    ELSE '999999'            
+    END                        
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','AGENCIA FIN',GETDATE())                                   
+
+PRINT N'AGENCIA FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                           
+             
+-- Z. COMPLETANDO INFORMACION CODIGO SEGMENTO Y SUBSEGMENTO SEGUN MARKETING Lógica de [dbo].[sp_PC_CARGA_MAECLIENTE]            
+   PRINT N'SEGMENTO INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                           
+           
+  UPDATE #DIM_CLI            
+  SET            
+  c_seg_mkt=CONVERT(VARCHAR(5),SEGMKT.U_COD_SEGMENTO)            
+  ,d_seg_mkt=CONVERT(CHAR(15),SEGMKT.U_SEGMENTO)            
+  --SELECT DCLI.c_cic,SEGMKT.U_COD_SEGMENTO, SEGMKT.U_SEGMENTO            
+  FROM  #DIM_CLI DCLI INNER JOIN MKTSeg.TDE_SEGMKTCLI SEGMKT            
+  ON DCLI.c_cic=SEGMKT.L_CIC            
+            
+PRINT N'SEGMENTO FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                                
+--T. COMPLETANDO EL Key de la EMpressa de Pago de Haberes            
+
+PRINT N'CREDIFONDO INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                           
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','CREDIFONDO INI',GETDATE())                                    
+
+IF OBJECT_ID('tempdb..#TEMDIMCLICRF') is not NULL DROP TABLE #TEMDIMCLICRF            
+            
+SELECT CRF.CL_FECHA, CRF.CL_CIC, CRF.CL_PATCLIENTE, CRF.CL_MATCLIENTE, CRF.CL_NOMBRECLIENTE,            
+CRF.CL_NOMCOMERCIAL, CRF.CL_FEC01, CRF.CL_TIPIDC, CRF.CL_IDCEXT, CRF.CL_NIT, CRF.CL_TIPPERSONA,            
+CRF.CL_TIPCLIENTE, CRF.CL_ESTCIVIL, CRF.CL_SEXO, CRF.CL_DIRECCION, CRF.CL_TELEFONOS            
+,ROW_NUMBER()OVER(PARTITION BY CRF.CL_CIC ORDER BY CRF.CL_CIC, CRF.CL_PATCLIENTE, CRF.CL_MATCLIENTE, CRF.CL_NOMBRECLIENTE,CRF.CL_TIPPERSONA,CRF.CL_ESTCIVIL, CRF.CL_SEXO DESC) AS ROWNUMBER             
+INTO #TEMDIMCLICRF            
+FROM BD_STAGEBCP.Cdf.FON_CLIENTES_CRF CRF            
+WHERE CL_FECHA = @v_fecha            
+
+
+            
+DELETE FROM #TEMDIMCLICRF WHERE ROWNUMBER <> 1            
+            
+UPDATE #DIM_CLI  SET fl_cdf = 1            
+FROM #DIM_CLI CLI INNER JOIN  #TEMDIMCLICRF CLICRF            
+ON CLI.c_idc = RIGHT('000000000'+ LTRIM(RTRIM(CLICRF.CL_CIC)),8)            
+--AND CLI.c_tip_idc = RTRIM(LTRIM(CLICRF.CL_TIPIDC))            
+AND CLI.d_ape_pat = LTRIM(RTRIM(CLICRF.CL_PATCLIENTE))            
+AND CLI.d_ape_mat = LTRIM(RTRIM(CLICRF.CL_MATCLIENTE))            
+            
+IF OBJECT_ID('tempdb..#DIM_CLI_BCP_CDF') is not NULL DROP TABLE #DIM_CLI_BCP_CDF            
+SELECT            
+@genDPERBCP AS 'key_id_per_bcp',            
+@genDCAL AS 'key_id_cal',            
+@genDCALMAX AS 'key_id_cal_max',            
+CONVERT(VARCHAR(12),'') AS 'c_cic',              
+CONVERT(VARCHAR(3),'') AS 'c_nac',             
+CONVERT(VARCHAR(3),'') AS 'c_fin_soc',                       
+CONVERT(VARCHAR(12),'') AS 'c_idc',                             
+CONVERT(VARCHAR(40),'') AS 'd_ape_pat',                                
+CONVERT(VARCHAR(40),'') AS 'd_ape_mat',                                
+CONVERT(VARCHAR(40),'') AS 'd_nom',                              
+CONVERT(VARCHAR(80),'') AS 'd_nom_cli',                                
+CONVERT(VARCHAR(40),'') AS 'd_des_nac',            
+CONVERT(VARCHAR(40),'') AS 'd_des_fin_soc',                             
+CONVERT(VARCHAR(6),'') AS 'c_pri_pro_pas_ape',                                    
+CONVERT(VARCHAR(6),'') AS 'c_pri_pro_act_ape',             
+CONVERT(VARCHAR(8),'') AS 'f_fec_nac',              
+CONVERT(TINYINT,0) AS 'fl_pdh',                   
+CONVERT(VARCHAR(2),'') AS 'c_tip_cli',             
+CONVERT(VARCHAR(40),'') AS 'd_des_tip_cli',            
+CONVERT(VARCHAR(3),'') AS 'c_est_civ',             
+CONVERT(VARCHAR(50),'') AS 'd_des_est_civ',            
+CONVERT(VARCHAR(3),'') AS 'c_ocu',            
+CONVERT(VARCHAR(35),'') AS 'd_des_ocu',            
+CONVERT(VARCHAR(5),'') AS 'c_prf',             
+CONVERT(VARCHAR(35),'') AS  'd_des_prf' ,                       
+CONVERT(VARCHAR(1),'') AS 'c_sex',                 
+CONVERT(VARCHAR(15),'') AS 'd_des_sex',            
+CONVERT(VARCHAR(3),'') AS 'c_cod_niv_edu',            
+CONVERT(VARCHAR(30), '') AS 'd_des_cod_niv_edu',            
+CONVERT(VARCHAR(3),'') AS 'c_cod_niv_soc_eco',            
+CONVERT(VARCHAR(20),'') AS 'd_des_cod_niv_soc_eco',            
+CONVERT(VARCHAR(3),'') AS 'c_mag',                  
+CONVERT(VARCHAR(40), '') AS 'd_des_mag',            
+CONVERT(VARCHAR(3),'') AS 'c_sta',            
+CONVERT(VARCHAR(25),'') AS 'd_des_sta',            
+CONVERT(VARCHAR(6),'' ) AS 'c_seg',            
+CONVERT(VARCHAR(40),'') AS 'd_des_seg',             
+CONVERT(VARCHAR(3),'' ) AS 'c_ban',             
+CONVERT(VARCHAR(40),'') AS 'd_des_ban',             
+CONVERT(VARCHAR(5),'' ) AS 'c_sub_seg',            
+CONVERT(VARCHAR(40),'') AS 'd_des_sub_seg',            
+CONVERT(VARCHAR(1),'') AS 'c_tip_per',             
+CONVERT(VARCHAR(20),'') AS 'd_des_tip_per',            
+CONVERT(VARCHAR(1),'') AS 'c_tip_idc',             
+CONVERT(VARCHAR(35),'') AS 'd_des_tip_idc',            
+CONVERT(VARCHAR(12),'')  AS 'd_des_nit',            
+CONVERT(VARCHAR(3),'') AS 'c_ext_idc',             
+CONVERT(VARCHAR(30),'') AS 'd_des_ext_idc',            
+CONVERT(VARCHAR(12),'') AS 'c_mat_ffn',            
+'999999' AS 'c_age' ,                       
+CONVERT(VARCHAR(5),'') AS 'c_seg_mkt',            
+CONVERT(VARCHAR(35),'') AS 'd_seg_mkt',            
+@genEntFin AS 'key_id_ent_fin',       --ZCS0 20110628            
+0 AS 'fl_cdf'             
+-- Modificado por MIA0            
+, CONVERT (SMALLDATETIME, '19000101') AS 'f_fec_reg_bio'            
+--            
+,CONVERT(TINYINT,9)  AS 'fl_est_ibk'           -- MGD0: Flag Estado Cliente - IBK             
+,CONVERT(VARCHAR(30),'') AS 'c_ult_usu_ibk'      -- MGD0: Codigo Ultimo Usuario - IBK            
+,CONVERT(DATETIME,'19000101') AS 'f_fec_cre_ibk'   -- MGD0: Fecha de Creacion - IBK            
+,CONVERT(TINYINT,0) AS 'fl_ibk'             -- MGD0: Flag para identificar cliente IBK - IBK            
+,@genEco AS 'key_id_act_eco'                 --ZCS0 20110620            
+,CONVERT(VARCHAR(9), '') AS 'c_cod_obs'             --ZCS0 20110620            
+,CONVERT(VARCHAR(1), '') AS 'c_est_nit'             --ZCS0 20110620            
+,CONVERT(VARCHAR(8), '') AS 'f_fec_cla_rie_man'           --ZCS0 20110620            
+,CONVERT(VARCHAR(8), '') AS 'f_fec_ult_mod'            --ZCS0 20110620            
+,CONVERT(VARCHAR(60), '') AS 'd_nom_cli_com'            --ZCS0 20110620            
+,CONVERT(VARCHAR(15), '') AS 'c_nro_reg_mer'           --ZCS0 20110620            
+,CONVERT(VARCHAR(1), '') AS 'c_res'              --ZCS0 20110620            
+,CONVERT(VARCHAR(5), '') AS 'c_sec'              --ZCS0 20110620            
+,CONVERT(VARCHAR(1), '') AS 'c_sit'              --ZCS0 20110620            
+,CONVERT(VARCHAR(1), '') AS 'c_sta_elim'            --ZCS0 20110620            
+,CONVERT(VARCHAR(2), '') AS 'c_tip_cla_rie_bcp'           --ZCS0 20110620            
+,CONVERT(VARCHAR(2), '') AS 'c_tip_cla_rie_man'           --ZCS0 20110620            
+,CONVERT(VARCHAR(3), '') AS 'c_cod_cat_emp'            --ZCS0 20110624            
+,CONVERT(VARCHAR(3), '') AS 'c_cod_tip_emp'           --ZCS0 20110624            
+,CONVERT(VARCHAR(2), '') AS 'c_tip_soc'           --ZCS0 20110624            
+,CONVERT(DATETIME,'19000101') AS 'f_fec_des_neg'    -- ZCS0: Fecha de Descargo Archivo Negativo (24-05-2011)            
+,CONVERT(DATETIME,'19000101') AS 'f_fec_ult_ing_neg'   -- ZCS0: Fecha de Ultima modificacion de  Archivo Negativo (24-05-2011)            
+,CONVERT(TINYINT,0) AS 'fl_neg'         -- ZCS0: Flag de Clientes que se encuentran en Archivo Negativo  (24-05-2011)            
+ ,CONVERT(VARCHAR(8), '') AS 'f_fec_ing'              --ZCS0 20110926            
+  ,CONVERT(VARCHAR(8), '') AS 'f_fec_cla_rie_bcp'              --ZCS0 20110926          
+  ,@genTipViv AS 'key_id_tip_viv'       --ZCS0 20110926          
+  ,0 AS 'c_nro_dep'         --ZCS0 20110926 
+  ,CONVERT(VARCHAR(1),'9') AS c_est_neg--MOR0 20141013
+  /***************************Ingresamos información de infoclientes JLE***************************/
+  ,CONVERT(VARCHAR(5),'NID') as c_prf_info 
+  ,CONVERT(VARCHAR(100),'NO ESPECIFICA') as d_des_prf_info 
+  ,@v_key_id_niv_edu           as key_id_niv_edu-->
+  ,@v_key_id_est_civ           as key_id_est_civ-->
+  ---------->aca debe entrar para la nac
+  ,CONVERT(VARCHAR(50),'')   as d_correo_electronico_info
+  ,CONVERT(VARCHAR(50),'')   as d_telefono_info
+  ,CONVERT(VARCHAR(10),'')   as d_celular_info
+  ,CONVERT(VARCHAR(2),'')    as fl_residente_info
+  ,CONVERT(VARCHAR(40),'')   as c_conyugue_idc_info
+  ,CONVERT(VARCHAR(50),'')   as d_conyugue_nombre_info--> SE AMPLIO TAMAÑO 20151005 ERROR JLE
+  ,CONVERT(VARCHAR(50),'')   as d_conyugue_ape_pat_info--> SE AMPLIO TAMAÑO 20151005 ERROR JLE
+  ,CONVERT(VARCHAR(50),'')   as d_conyugue_ape_mat_info--> SE AMPLIO TAMAÑO 20151005 ERROR JLE
+  ,CONVERT(VARCHAR(3),'')    as c_conyugue_nac_info--> se ve si este campo machara con la dim pais
+  ,CONVERT(VARCHAR(2),'')    as fl_conyugue_residente_info
+  ,CONVERT(VARCHAR(100),'')  as d_refpersonal1_nombre_info
+  ,CONVERT(VARCHAR(150),'')  as d_refpersonal1_direccion_info
+  ,CONVERT(VARCHAR(20),'')   as d_refpersonal1_telefono_info
+  ,CONVERT(VARCHAR(100),'')  as d_refpersonal2_nombre_info
+  ,CONVERT(VARCHAR(150),'')  as d_refpersonal2_direccion_info
+  ,CONVERT(VARCHAR(20),'')   as d_refpersonal2_telefono_info
+  ,CONVERT(VARCHAR(100),'')  as d_refpersonal3_nombre_info
+  ,CONVERT(VARCHAR(150),'')  as d_refpersonal3_direccion_info
+  ,CONVERT(VARCHAR(20),'')   as d_refpersonal3_telefono_info
+  ,CONVERT(VARCHAR(100),'')  as d_nombre_emp_info
+  ,CONVERT(VARCHAR(5),'NID')    as c_cargo_info-->MODIFICADO
+  ,CONVERT(VARCHAR(100),'NO ESPECIFICA')  as d_des_cargo_info  
+  ,CONVERT(VARCHAR(100),'')  as d_telefono_emp_info
+  ,CONVERT(VARCHAR(50),'')   as d_correo_electronico_emp_info  
+  ,CONVERT(VARCHAR(2),'')    as fl_fun_publico_info
+  ,@v_key_id_sit_lab         as key_id_sit_lab-->se relaciona con la nueva dim situacion laboral 
+  ,CONVERT(VARCHAR(50),'')   as d_nit_info
+  ,CONVERT(VARCHAR(2),'')    as fl_negocio_propio_info
+  ,CONVERT(VARCHAR(2),'')    as fl_pep_info
+  ,CONVERT(VARCHAR(150),'')  as d_cargo_pep_info
+  ,CONVERT(VARCHAR(20),'')   as d_periodo_pep_info
+  ,@v_key_id_pai             as key_id_pai-->se relaciona con la dim pais para la nacionalidad
+    ------>nuevos
+  ,CONVERT(VARCHAR(5),'00')  AS d_complemento_idc_info  
+  ,CONVERT(VARCHAR(5),'NID')    AS c_residencia_pais_info
+  ,CONVERT(VARCHAR(10),'')   AS d_fax_info
+  ,CONVERT(VARCHAR(10),'')   AS d_interno_emp_info
+  ,CONVERT(VARCHAR(10),'')   AS d_fec_ingreso_trabajo_info
+  ,CONVERT(VARCHAR(10),'NID')    AS c_actividad_info 
+  ,CONVERT(VARCHAR(150),'NO ESPECIFICA')  AS d_actividad_info-->
+  ,CONVERT(VARCHAR(5),'NID')    AS c_ciiu_info-->MODIFICADO
+  ,CONVERT(VARCHAR(250),'NO ESPECIFICA')  AS d_ciiu_info-->MODIFICADO
+  ,CONVERT(DECIMAL(19,4),0)  AS i_salario_info-->
+  ,@v_key_id_pai             AS key_id_pai_res
+INTO #DIM_CLI_BCP_CDF            
+WHERE 1=2            
+            
+ 
+            
+--TRUNCATE TABLE #DIM_CLI_BCP_CDF            
+/****************************** corriendo hasta aca 20150616-1324******************************/--------------------------------------------------------------------------------------------------------------------------------
+            
+IF OBJECT_ID('tempdb..#DIM_CLI_FINAL') is not NULL DROP TABLE #DIM_CLI_FINAL            
+
+SELECT             
+key_id_per_bcp, key_id_cal, key_id_cal_max, c_cic, c_nac, c_fin_soc, c_idc, d_ape_pat, d_ape_mat,             
+d_nom, d_nom_cli, d_des_nac, d_des_fin_soc, c_pri_pro_pas_ape, c_pri_pro_act_ape,             
+f_fec_nac, fl_pdh, c_tip_cli, d_des_tip_cli, c_est_civ, d_des_est_civ, c_ocu, d_des_ocu,            
+c_prf, d_des_prf, c_sex, d_des_sex, c_cod_niv_edu, d_des_cod_niv_edu, c_cod_niv_soc_eco,             
+d_des_cod_niv_soc_eco, c_mag, d_des_mag, c_sta, d_des_sta, c_seg, d_des_seg, c_ban,            
+d_des_ban, c_sub_seg, d_des_sub_seg, c_tip_per, d_des_tip_per, c_tip_idc, d_des_tip_idc,            
+d_des_nit, c_ext_idc, d_des_ext_idc,c_mat_ffn,             
+--c_cal, c_max_cal, d_des_cal,             
+c_age, c_seg_mkt, d_seg_mkt,            
+key_id_ent_fin, fl_cdf,             
+--Modificado por MIA0            
+f_fec_reg_bio,            
+--            
+fl_est_ibk, c_ult_usu_ibk, f_fec_cre_ibk, fl_ibk -- Añadido por MGD0            
+,key_id_act_eco,c_cod_obs,c_est_nit,f_fec_cla_rie_man,f_fec_ult_mod,d_nom_cli_com
+,c_nro_reg_mer,c_res,c_sec,c_sit,c_sta_elim,c_tip_cla_rie_bcp,c_tip_cla_rie_man, --Añadido ZCS0            
+c_cod_cat_emp,c_cod_tip_emp,c_tip_soc,--Añadido ZCS0            
+f_fec_des_neg,f_fec_ult_ing_neg,fl_neg,    --  Añadido por ZCS0          
+ f_fec_ing,f_fec_cla_rie_bcp,key_id_tip_viv,  c_nro_dep ,           --ZCS0 20110926            
+@genEco AS key_id_act_eco_sec, --MIA0 20120131   
+ c_est_neg --MOR0 20141013
+------------------------------------------------------------
+, c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ, d_correo_electronico_info
+, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info, d_conyugue_nombre_info
+, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info, fl_conyugue_residente_info
+, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+, d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info
+, d_refpersonal3_nombre_info, d_refpersonal3_direccion_info, d_refpersonal3_telefono_info
+, d_nombre_emp_info, c_cargo_info, d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info  
+, fl_fun_publico_info, key_id_sit_lab, d_nit_info, fl_negocio_propio_info, fl_pep_info
+, d_cargo_pep_info , d_periodo_pep_info, key_id_pai
+, d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res,
+---------------------------------------------------------------
+CONVERT(SMALLDATETIME,'19000101') AS 'EffectiveDate',            
+CONVERT(SMALLDATETIME,'19000101') AS 'ExpirationDate'  
+ ,CONVERT(INT,0)  key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0) [UpdateExisting]
+	,CONVERT(DATE,'19000101') [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') [OldExpirationDate]
+	,CONVERT(DATE,'19000101') [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') [UpdateExpirationDate]
+	,CONVERT(BIT,0) [InsertNew]
+	,CONVERT(DATE,'19000101') AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101') AS [InsertExpirationDate]
+	,CONVERT(BIT,0) [OverwriteExisting]       
+INTO #DIM_CLI_FINAL              
+FROM #DIM_CLI_BCP_CDF            
+WHERE 1=2            
+--TRUNCATE TABLE #DIM_CLI_FINAL  
+
+            
+INSERT INTO #DIM_CLI_BCP_CDF            
+SELECT              
+@genDPERBCP AS 'key_id_per_bcp',            
+@genDCAL AS 'key_id_cal',            
+@genDCALMAX AS 'key_id_cal_max',            
+LTRIM(RTRIM(CLICRF.CL_CIC)) AS 'c_cic',              
+'999' AS 'c_nac',             
+'999' AS 'c_fin_soc',             
+ISNULL(CLICRF.CL_CIC, RIGHT('000000000'+ LTRIM(RTRIM(CL_CIC)),8)) AS 'c_idc',                             
+ISNULL(CLICRF.CL_PATCLIENTE,'NID') AS 'd_ape_pat',                              
+ISNULL(CLICRF.CL_MATCLIENTE,'NID') AS 'd_ape_mat',                                
+ISNULL(CLICRF.CL_NOMBRECLIENTE,'NID') AS 'd_nom',                              
+ISNULL(CLICRF.CL_NOMCOMERCIAL,'NID') AS 'd_nom_cli',                              
+'NID' AS 'd_des_nac',            
+'NID' AS 'd_des_fin_soc',                             
+'999999' AS 'c_pri_pro_pas_ape',                                    
+'999999' AS 'c_pri_pro_act_ape',             
+'19000101' AS 'f_fec_nac',              
+CONVERT(TINYINT,9) AS 'fl_pdh',                   
+'99' AS 'c_tip_cli',             
+'NID' AS 'd_des_tip_cli',            
+--S= Soltera C = casado D = Divorciado V =Viudo            
+CASE             
+   WHEN CLICRF.CL_ESTCIVIL = 'S' THEN 'SOL'             
+   WHEN CLICRF.CL_ESTCIVIL = 'C' THEN 'CAS'            
+   WHEN CLICRF.CL_ESTCIVIL = 'D' THEN 'SEP'            
+   WHEN CLICRF.CL_ESTCIVIL = 'V' THEN 'VIU'            
+   WHEN CLICRF.CL_ESTCIVIL IS NULL THEN '999'            
+ELSE CLICRF.CL_ESTCIVIL             
+END AS 'c_est_civ',            
+'NID' AS 'd_des_est_civ',            
+'999' AS 'c_ocu',            
+'NID' AS 'd_des_ocu',            
+'99999' AS 'c_prf',             
+'NID' AS  'd_des_prf' ,               
+ISNULL(CLICRF.CL_SEXO,'9') AS 'c_sex', --F= Femenino M = Masculino            
+'NID' AS 'd_des_sex',            
+'999' AS 'c_cod_niv_edu',            
+'NID' AS 'd_des_cod_niv_edu',            
+'999' AS 'c_cod_niv_soc_eco',            
+'NID' AS 'd_des_cod_niv_soc_eco',            
+'9' AS 'c_mag',                  
+'NID' AS 'd_des_mag',            
+'999' AS 'c_sta',            
+'NID' AS 'd_des_sta',            
+'999999' AS 'c_seg',            
+'NID' AS 'd_des_seg',             
+'999' AS 'c_ban',             
+'NID' AS 'd_des_ban',             
+'99999' AS 'c_sub_seg',            
+'NID' AS 'd_des_sub_seg',            
+ISNULL(CLICRF.CL_TIPPERSONA,'9') AS 'c_tip_per',             
+--P = Persona E = Empresa            
+'NID' AS 'd_des_tip_per',             
+--'Q' Carnet de identidad, 'R' = Nit 'P' =Pasaporte 'S' = Run            
+ISNULL(CLICRF.CL_TIPIDC,'9') AS 'c_tip_idc',             
+'NID' AS 'd_des_tip_idc',            
+ISNULL(CLICRF.CL_NIT,'999999999999') AS 'd_des_nit',            
+'999' AS 'c_ext_idc',             
+'NID' AS 'd_des_ext_idc',            
+ '999999999999' AS 'c_mat_ffn',            
+'999999' AS 'c_age' ,            
+'99999' AS 'c_seg_mkt',            
+'NID' AS 'd_seg_mkt',     @genEntFin AS 'key_id_ent_fin',       --ZCS0 20110628            
+1 AS 'fl_cdf'             
+--Modificado por MIA0            
+, CONVERT (SMALLDATETIME, '19000101') AS 'f_fec_reg_bio'            
+--            
+,CONVERT(TINYINT,9)  AS 'fl_est_ibk'           -- MGD0: Flag Estado Cliente - IBK             
+,'NID' AS 'c_ult_usu_ibk'                -- MGD0: Codigo Ultimo Usuario - IBK            
+,CONVERT(DATETIME,'19000101') AS 'f_fec_cre_ibk'   -- MGD0: Fecha de Creacion - IBK            
+,CONVERT(TINYINT,0) AS 'fl_ibk'             -- MGD0: Flag para identificar cliente IBK - IBK            
+,@genEco AS 'key_id_act_eco'                 --ZCS0 20110620            
+, 'NID' AS 'c_cod_obs'             --ZCS0 20110620            
+, '9'AS 'c_est_nit'             --ZCS0 20110620            
+,'19000101' AS 'f_fec_cla_rie_man'           --ZCS0 20110620            
+, '19000101' AS 'f_fec_ult_mod'            --ZCS0 20110620            
+,'NID' AS 'd_nom_cli_com'            --ZCS0 20110620            
+,'NID' AS   'c_nro_reg_mer'           --ZCS0 20110620            
+,'9' AS 'c_res'              --ZCS0 20110620            
+,'NID' AS  'c_sec'              --ZCS0 20110620            
+, '9' AS 'c_sit'              --ZCS0 20110620            
+, '9' AS 'c_sta_elim'            --ZCS0 20110620            
+, '99' AS 'c_tip_cla_rie_bcp'           --ZCS0 20110620            
+,'99' AS 'c_tip_cla_rie_man'           --ZCS0 20110620            
+, '999' AS 'c_cod_cat_emp'            --ZCS0 20110624            
+, '999' AS 'c_cod_tip_emp'           --ZCS0 20110624            
+,'99' AS 'c_tip_soc'           --ZCS0 20110624            
+,CONVERT(DATETIME,'19000101') AS 'f_fec_des_neg'    -- ZCS0: Fecha de Descargo Archivo Negativo (24-05-2011)            
+,CONVERT(DATETIME,'19000101') AS 'f_fec_ult_ing_neg'   -- ZCS0: Fecha de Ultima modificacion de  Archivo Negativo (24-05-2011)            
+,CONVERT(TINYINT,0) AS 'fl_neg'         -- ZCS0: Flag de Clientes que se encuentran en Archivo Negativo  (24-05-2011)            
+,'19000101' AS 'f_fec_ing'              --ZCS0 20110926            
+  ,'19000101' AS 'f_fec_cla_rie_bcp'              --ZCS0 20110926          
+  ,@genTipViv AS 'key_id_tip_viv'       --ZCS0 20110926  --key_id_tip_viv        
+  ,0 AS 'c_nro_dep'        
+  ,'9' as c_est_neg --MOR0 20141013   
+----------------------------------------------------
+  ,CONVERT(VARCHAR(5),'NID') as c_prf_info 
+  ,CONVERT(VARCHAR(100),'NO ESPECIFICA') as d_des_prf_info 
+  ,@v_key_id_niv_edu           as key_id_niv_edu-->
+  ,@v_key_id_est_civ           as key_id_est_civ-->
+  ---------->aca debe entrar para la nac
+  ,CONVERT(VARCHAR(50),'')   as d_correo_electronico_info
+  ,CONVERT(VARCHAR(50),'')   as d_telefono_info
+  ,CONVERT(VARCHAR(10),'')   as d_celular_info
+  ,CONVERT(VARCHAR(2),'')    as fl_residente_info
+  ,CONVERT(VARCHAR(40),'')   as c_conyugue_idc_info
+  ,CONVERT(VARCHAR(50),'')   as d_conyugue_nombre_info--> SE AMPLIO TAMAÑO 20151005 ERROR JLE
+  ,CONVERT(VARCHAR(50),'')   as d_conyugue_ape_pat_info--> SE AMPLIO TAMAÑO 20151005 ERROR JLE
+  ,CONVERT(VARCHAR(50),'')   as d_conyugue_ape_mat_info--> SE AMPLIO TAMAÑO 20151005 ERROR JLE
+  ,CONVERT(VARCHAR(3),'')    as c_conyugue_nac_info--> se ve si este campo machara con la dim pais
+  ,CONVERT(VARCHAR(2),'')    as fl_conyugue_residente_info
+  ,CONVERT(VARCHAR(100),'')  as d_refpersonal1_nombre_info
+  ,CONVERT(VARCHAR(150),'')  as d_refpersonal1_direccion_info
+  ,CONVERT(VARCHAR(20),'')   as d_refpersonal1_telefono_info
+  ,CONVERT(VARCHAR(100),'')  as d_refpersonal2_nombre_info
+  ,CONVERT(VARCHAR(150),'')  as d_refpersonal2_direccion_info
+  ,CONVERT(VARCHAR(20),'')   as d_refpersonal2_telefono_info
+  ,CONVERT(VARCHAR(100),'')  as d_refpersonal3_nombre_info
+  ,CONVERT(VARCHAR(150),'')  as d_refpersonal3_direccion_info
+  ,CONVERT(VARCHAR(20),'')   as d_refpersonal3_telefono_info
+  ,CONVERT(VARCHAR(100),'')  as d_nombre_emp_info
+  ,CONVERT(VARCHAR(5),'NID')    as c_cargo_info-->MODIFICADO
+  ,CONVERT(VARCHAR(100),'NO ESPECIFICA')  as d_des_cargo_info  
+  ,CONVERT(VARCHAR(100),'')  as d_telefono_emp_info
+  ,CONVERT(VARCHAR(50),'')   as d_correo_electronico_emp_info  
+  ,CONVERT(VARCHAR(2),'')    as fl_fun_publico_info
+  ,@v_key_id_sit_lab         as key_id_sit_lab-->se relaciona con la nueva dim situacion laboral 
+  ,CONVERT(VARCHAR(50),'')   as d_nit_info
+  ,CONVERT(VARCHAR(2),'')    as fl_negocio_propio_info
+  ,CONVERT(VARCHAR(2),'')    as fl_pep_info
+  ,CONVERT(VARCHAR(150),'')  as d_cargo_pep_info
+  ,CONVERT(VARCHAR(20),'')   as d_periodo_pep_info  
+  ,@v_key_id_pai             as key_id_pai
+    ------>nuevos
+  ,CONVERT(VARCHAR(5),'00')  AS d_complemento_idc_info  
+  ,CONVERT(VARCHAR(5),'NID')    AS c_residencia_pais_info
+  ,CONVERT(VARCHAR(10),'')   AS d_fax_info
+  ,CONVERT(VARCHAR(10),'')   AS d_interno_emp_info
+  ,CONVERT(VARCHAR(10),'')   AS d_fec_ingreso_trabajo_info
+  ,CONVERT(VARCHAR(10),'NID')    AS c_actividad_info 
+  ,CONVERT(VARCHAR(150),'NO ESPECIFICA')  AS d_actividad_info-->
+  ,CONVERT(VARCHAR(5),'NID')    AS c_ciiu_info-->MODIFICADO
+  ,CONVERT(VARCHAR(250),'NO ESPECIFICA')  AS d_ciiu_info-->MODIFICADO
+  ,CONVERT(DECIMAL(19,4),0)  AS i_salario_info-->
+  ,@v_key_id_pai             AS key_id_pai_res  
+FROM #DIM_CLI CLI RIGHT OUTER JOIN #TEMDIMCLICRF CLICRF            
+ON CLI.c_idc = RIGHT('000000000'+ LTRIM(RTRIM(CLICRF.CL_CIC)),8)            
+--AND CLI.c_tip_idc = RTRIM(LTRIM(CLICRF.CL_TIPIDC))            
+AND CLI.d_ape_pat = LTRIM(RTRIM(CLICRF.CL_PATCLIENTE))            
+AND CLI.d_ape_mat = LTRIM(RTRIM(CLICRF.CL_MATCLIENTE))            
+WHERE c_cic IS NULL            
+            
+---Actualizar Personal BCP              
+ UPDATE #DIM_CLI_BCP_CDF            
+ SET key_id_per_bcp =  ISNULL(B.key_id_per_bcp,@genDPERBCP)            
+ FROM #DIM_CLI_BCP_CDF A LEFT OUTER JOIN BD_DWBCP.Dwh.Dim_personal_bcp B            
+ ON LTRIM(RTRIM(A.c_mat_ffn))=LTRIM(RTRIM(B.c_mat)) --MIA0 20120917            
+ AND (@v_fecha>=CONVERT(VARCHAR(8),B.EffectiveDate,112) AND @v_fecha<=CONVERT(VARCHAR(8),B.ExpirationDate,112))            
+
+PRINT N'CREDIFONDO FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                           
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','CREDIFONDO FIN',GETDATE()) 
+            
+PRINT N'UNION D TODAS FUENTES INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                           
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UNION TEMPORALES CLIENTE INI',GETDATE())            
+            
+INSERT INTO #DIM_CLI_FINAL            
+SELECT             
+key_id_per_bcp, key_id_cal, key_id_cal_max, c_cic, c_nac, c_fin_soc, c_idc, d_ape_pat, d_ape_mat,             
+d_nom, d_nom_cli, d_des_nac, d_des_fin_soc, c_pri_pro_pas_ape, c_pri_pro_act_ape,             
+CASE WHEN ISDATE(f_fec_nac)= 1 THEN f_fec_nac ELSE 19000101 END AS 'f_fec_nac'            
+, fl_pdh, c_tip_cli, d_des_tip_cli, c_est_civ, d_des_est_civ, c_ocu, d_des_ocu,            
+c_prf, d_des_prf, c_sex, d_des_sex, c_cod_niv_edu, d_des_cod_niv_edu, c_cod_niv_soc_eco,             
+d_des_cod_niv_soc_eco, c_mag, d_des_mag, c_sta, d_des_sta, c_seg, d_des_seg, c_ban,            
+d_des_ban, c_sub_seg, d_des_sub_seg, c_tip_per, d_des_tip_per, c_tip_idc, d_des_tip_idc,            
+d_des_nit, c_ext_idc, d_des_ext_idc, c_mat_ffn,            
+--c_cal, c_max_cal, d_des_cal,             
+c_age, c_seg_mkt, d_seg_mkt,            
+key_id_ent_fin, fl_cdf,            
+-- Modificado por MIA0            
+f_fec_reg_bio,            
+--             
+fl_est_ibk, c_ult_usu_ibk, f_fec_cre_ibk, fl_ibk, -- Añadido por MGD0            
+key_id_act_eco,c_cod_obs,c_est_nit,f_fec_cla_rie_man,f_fec_ult_mod,d_nom_cli_com,c_nro_reg_mer,c_res,c_sec,c_sit,c_sta_elim,c_tip_cla_rie_bcp,c_tip_cla_rie_man, --Añadido ZCS0            
+c_cod_cat_emp,c_cod_tip_emp,c_tip_soc,            
+f_fec_des_neg,f_fec_ult_ing_neg,fl_neg,    --  Añadido por ZCS0            
+f_fec_ing,f_fec_cla_rie_bcp,key_id_tip_viv,  c_nro_dep ,           --ZCS0 20110926        
+key_id_act_eco_sec, --MIA0 20120131   
+c_est_neg --MOR0 20141013
+------------------------------------------------------------
+, c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ, d_correo_electronico_info
+, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info, d_conyugue_nombre_info
+, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info, fl_conyugue_residente_info
+, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+, d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info
+, d_refpersonal3_nombre_info, d_refpersonal3_direccion_info, d_refpersonal3_telefono_info
+, d_nombre_emp_info, c_cargo_info, d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info  
+, fl_fun_publico_info, key_id_sit_lab, d_nit_info, fl_negocio_propio_info, fl_pep_info
+, d_cargo_pep_info , d_periodo_pep_info,key_id_pai
+, d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res,
+--------------------------------------------------------------
+CONVERT(SMALLDATETIME,'19000101') AS 'EffectiveDate',            
+CONVERT(SMALLDATETIME,'19000101') AS 'ExpirationDate' 
+ ,CONVERT(INT,0)  --key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0)-- [UpdateExisting]
+	,CONVERT(DATE,'19000101')-- AS [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [OldExpirationDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateExpirationDate]
+	,CONVERT(BIT,0) --[InsertNew]
+	,CONVERT(DATE,'19000101')-- AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101')-- AS [InsertExpirationDate]
+	,CONVERT(BIT,0)-- [OverwriteExisting]            
+FROM #DIM_CLI             
+UNION            
+SELECT             
+key_id_per_bcp, key_id_cal, key_id_cal_max, c_cic, c_nac, c_fin_soc, c_idc, d_ape_pat, d_ape_mat,           
+d_nom, d_nom_cli, d_des_nac, d_des_fin_soc, c_pri_pro_pas_ape, c_pri_pro_act_ape,             
+CASE WHEN ISDATE(f_fec_nac)= 1 THEN f_fec_nac ELSE 19000101 END AS 'f_fec_nac',            
+fl_pdh, c_tip_cli, d_des_tip_cli, c_est_civ, d_des_est_civ, c_ocu, d_des_ocu,            
+c_prf, d_des_prf, c_sex, d_des_sex, c_cod_niv_edu, d_des_cod_niv_edu, c_cod_niv_soc_eco,             
+d_des_cod_niv_soc_eco, c_mag, d_des_mag, c_sta, d_des_sta, c_seg, d_des_seg, c_ban,            
+d_des_ban, c_sub_seg, d_des_sub_seg, c_tip_per, d_des_tip_per, c_tip_idc, d_des_tip_idc,            
+d_des_nit, c_ext_idc, d_des_ext_idc, c_mat_ffn,             
+--c_cal, c_max_cal, d_des_cal,             
+c_age, c_seg_mkt, d_seg_mkt,            
+key_id_ent_fin, fl_cdf,            
+--Modificado por MIA0            
+f_fec_reg_bio,            
+--            
+fl_est_ibk, c_ult_usu_ibk, f_fec_cre_ibk, fl_ibk, -- Añadido por MGD0            
+key_id_act_eco,c_cod_obs,c_est_nit,f_fec_cla_rie_man,f_fec_ult_mod,d_nom_cli_com,c_nro_reg_mer,c_res,c_sec,c_sit,c_sta_elim,c_tip_cla_rie_bcp,c_tip_cla_rie_man, --Añadido ZCS0            
+            
+c_cod_cat_emp,c_cod_tip_emp,c_tip_soc,    ----Añadido ZCS0            
+f_fec_des_neg,f_fec_ult_ing_neg,fl_neg,    --  Añadido por ZCS0            
+ f_fec_ing,f_fec_cla_rie_bcp,key_id_tip_viv,  c_nro_dep ,           --ZCS0 20110926        
+@genEco AS  key_id_act_eco_sec, --MIA0 20120131 
+c_est_neg --MOR0 20141013  
+------------------------------------------------------------
+, c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ, d_correo_electronico_info
+, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info, d_conyugue_nombre_info
+, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info, fl_conyugue_residente_info
+, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+, d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info
+, d_refpersonal3_nombre_info, d_refpersonal3_direccion_info, d_refpersonal3_telefono_info
+, d_nombre_emp_info, c_cargo_info, d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info  
+, fl_fun_publico_info, key_id_sit_lab, d_nit_info, fl_negocio_propio_info, fl_pep_info
+, d_cargo_pep_info , d_periodo_pep_info,key_id_pai
+, d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res,
+--------------------------------------------------------------
+   
+CONVERT(SMALLDATETIME,'19000101') AS 'EffectiveDate',            
+CONVERT(SMALLDATETIME,'19000101') AS 'ExpirationDate'
+ ,CONVERT(INT,0)  --key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0)-- [UpdateExisting]
+	,CONVERT(DATE,'19000101')-- AS [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [OldExpirationDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateExpirationDate]
+	,CONVERT(BIT,0) --[InsertNew]
+	,CONVERT(DATE,'19000101')-- AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101')-- AS [InsertExpirationDate]
+	,CONVERT(BIT,0)-- [OverwriteExisting]             
+FROM #DIM_CLI_BCP_CDF            
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UNION TEMPORALES CLIENTE FIN',GETDATE())            
+            
+-- AA. COMPLETANDO FLAG ENTIDAD FINANCIERA            
+            
+--**MODIFICADO ZCS0            
+UPDATE #DIM_CLI_FINAL            
+SET key_id_ent_fin = ENTFIN.key_id_ent_fin            
+FROM #DIM_CLI_FINAL DCLI INNER JOIN BD_DWBCP.Dwh.Dim_entidad_financiera ENTFIN            
+ON  DCLI.c_cic = ENTFIN.c_cic and dw_flg_estado=1          
+            
+
+PRINT N'UNION D TODAS FUENTES FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                                      
+
+PRINT N'ACTUALIZACION PERSONAL INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                                      
+            
+--AC. ACTUALIZANDO EL KEY DEL ID DEL PERSONAL             
+UPDATE #DIM_CLI_FINAL            
+SET key_id_per_bcp=ISNULL(PERBCP.key_id_per_bcp,@genDPERBCP)            
+FROM BD_DWBCP.Dwh.Dim_personal_bcp PERBCP            
+WHERE LTRIM(RTRIM(c_mat_ffn)) = LTRIM(RTRIM(c_mat)) --MIA0 20120917            
+and (@v_fecha>=PERBCP.EffectiveDate AND @v_fecha<=PERBCP.ExpirationDate)            
+
+PRINT N'ACTUALIZACION PERSONAL FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                                                  
+
+PRINT N'ACTUALIZACION DICCIONARIO 3 INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)   
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','ACTUALIZACION DICCIONARIO 3 INI',GETDATE())            
+
+UPDATE #DIM_CLI_FINAL            
+SET  d_des_sex=SEX.d_des_cod
+	,d_des_tip_per = TIP_PER.d_des_cod 
+	,d_des_est_civ = isnull(EST_CIV.d_des_cod,'NID')
+	,d_des_tip_idc= TIP_IDC.d_des_cod
+FROM #DIM_CLI_FINAL CLI
+LEFT JOIN #Dim_DicDWH_CLI SEX ON (CLI.c_sex = SEX.c_cod_fue AND SEX.c_cod_tip_dat = 'SEXO' )         
+LEFT JOIN #Dim_DicDWH_CLI TIP_PER ON (CLI.c_tip_per = TIP_PER.c_cod_fue AND TIP_PER.c_cod_tip_dat = 'TIPPERSONA' )                
+LEFT JOIN #Dim_DicDWH_CLI EST_CIV ON (CLI.c_est_civ = EST_CIV.c_cod_fue AND EST_CIV.c_cod_tip_dat = 'ESTCIVIL' )                  ----------------------------->BUSCARA ACA
+LEFT JOIN #Dim_DicDWH_CLI TIP_IDC ON (CLI.c_tip_idc = TIP_IDC.c_cod_fue AND TIP_IDC.c_cod_tip_dat = 'TIPIDC' )                                    
+
+
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','ACTUALIZACION DICCIONARIO 3 FIN',GETDATE())   
+         
+PRINT N'ACTUALIZACION DICCIONARIO 3 FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)   
+----Cliente genérico            
+
+
+
+---------------------------------------------------------------------------------------------------ahora corremos hasta aca 20150616:1330            
+INSERT INTO #DIM_CLI_FINAL             
+VALUES ( @genDPERBCP, @genDCAL, @genDCALMAX,'999999999999', '999', '999', '999999999999', 'NID', 'NID',             
+      'NID', 'NID', 'NID', 'NID', '999999', '999999',             
+      19000101, 9, '99', 'NID', '999', 'NID', '999',             
+      'NID', '99999', 'NID', '9', 'NID', '999', 'NID',             
+      '999', 'NID', '999', 'NID', '999', 'NID',             
+      '999999', 'NID', '999', 'NID', '99999', 'NID', '9',             
+      'NID', '9', 'NID', '999999999999', '999', 'NID', '999999999999',            
+      --'9', 9, 'NID',             
+      999999,'99999','NID', @genEntFin, 9,            
+      --Modificado por MIA0            
+      CONVERT (SMALLDATETIME, '19000101'),            
+      --            
+      9,'NID',CONVERT(DATETIME,'19000101'), 9,      --Añadido por MGD0            
+      @genEco , 'NID' , '9','19000101' , '19000101' ,'NID' ,'NID' ,'9' ,'NID' , '9', '9' , '99','99' ,'999','999','99' --ZCS0 20110620            
+      , CONVERT(DATETIME,'19000101'),CONVERT(DATETIME,'19000101'), 0, --Añadido por ZCS0          
+        '19000101' , '19000101',@genTipViv,0, --Añadido por ZCS0     
+        @genEco, '9', --MOR0 20141013     
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------
+  'NID' ,'NO ESPECIFICA',@v_key_id_niv_edu, @v_key_id_est_civ -->c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ
+  ,'', '' ,'' , '' ,'' -->d_correo_electronico_info, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info
+  ,'' ,'' ,'' ,''  -->  d_conyugue_nombre_info, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info,
+  ,'' ,'' ,'' , '' -->  fl_conyugue_residente_info, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+  ,'' ,'' ,'' ,''  -->  d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info, d_refpersonal3_nombre_info,
+  ,'' ,'' ,'' ,'NID'  -->  d_refpersonal3_direccion_info, d_refpersonal3_telefono_info, d_nombre_emp_info, c_cargo_info,
+  ,'NO ESPECIFICA' ,'' , '' , '' ,@v_key_id_sit_lab --> d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info , fl_fun_publico_info, key_id_sit_lab,
+  ,'' , '' ,''  ,'' , '' ,@v_key_id_pai--> d_nit_info, fl_negocio_propio_info, fl_pep_info, d_cargo_pep_info , d_periodo_pep_info,key_id_pai
+  ,'00', 'NID','','','','NID','NO ESPECIFICA','NID','NO ESPECIFICA',0, @v_key_id_pai,--->d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+                                                  -->,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res
+---------------------------------------------------------------------------------------------------------------
+      CONVERT(SMALLDATETIME,GETDATE()),            
+   CONVERT(SMALLDATETIME,'19000101') 
+    ,CONVERT(INT,0)  --key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0)-- [UpdateExisting]
+	,CONVERT(DATE,'19000101')-- AS [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [OldExpirationDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateExpirationDate]
+	,CONVERT(BIT,0) --[InsertNew]
+	,CONVERT(DATE,'19000101')-- AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101')-- AS [InsertExpirationDate]
+	,CONVERT(BIT,0)-- [OverwriteExisting]
+   )             
+----Clientes Gremio 94            
+DECLARE @key_id_act_eco_94 INT
+SET @key_id_act_eco_94 =(SELECT key_id_act_eco FROM BD_DWBCP.Dwh.Dim_activ_economica WHERE c_act_eco='0094     ')
+DECLARE @gen_BG94901 INT=(SELECT TOP 1 key_id_per_bcp FROM BD_DWBCP.Dwh.Dim_personal_bcp WHERE c_mat='BG94901' )
+DECLARE @gen_BG94801 INT=(SELECT TOP 1 key_id_per_bcp FROM BD_DWBCP.Dwh.Dim_personal_bcp WHERE c_mat='BG94801' )
+DECLARE @gen_BG94701 INT=(SELECT TOP 1 key_id_per_bcp FROM BD_DWBCP.Dwh.Dim_personal_bcp WHERE c_mat='BG94701' )
+DECLARE @gen_BG94601 INT=(SELECT TOP 1 key_id_per_bcp FROM BD_DWBCP.Dwh.Dim_personal_bcp WHERE c_mat='BG94601' )
+DECLARE @gen_BG94501 INT=(SELECT TOP 1 key_id_per_bcp FROM BD_DWBCP.Dwh.Dim_personal_bcp WHERE c_mat='BG94501' )
+DECLARE @gen_BG94401 INT=(SELECT TOP 1 key_id_per_bcp FROM BD_DWBCP.Dwh.Dim_personal_bcp WHERE c_mat='BG94401' )
+DECLARE @gen_BG94301 INT=(SELECT TOP 1 key_id_per_bcp FROM BD_DWBCP.Dwh.Dim_personal_bcp WHERE c_mat='BG94301')
+DECLARE @gen_BG94201 INT=(SELECT TOP 1 key_id_per_bcp FROM BD_DWBCP.Dwh.Dim_personal_bcp WHERE c_mat='BG94201' )
+DECLARE @gen_BG94101 INT=(SELECT TOP 1 key_id_per_bcp FROM BD_DWBCP.Dwh.Dim_personal_bcp WHERE c_mat='BG94101')
+
+INSERT INTO #DIM_CLI_FINAL            
+VALUES ( @gen_BG94101,         
+   @genDCAL,@genDCALMAX,'GM9400000101', '999', '999', '94101104', 'CLIENTE GM94101', 'NID',             
+      'NID', 'CLIENTE GM94101', 'NID', 'NID', '999999', '999999',             
+      19000101, 9, 'CX', 'CLIENTE EXCLUSIVO', '999', 'NID', '999',             
+      'NID', '99999', 'NID', '9', 'NID', '999', 'NID',             
+      '999', 'NID', '8', 'INFORMACION NO REGISTRADA', 'N', 'NORMAL',             
+      'PG', 'GREMIO94', 'P', 'BANCA PERSONAL', '1', 'SUBSEGMENTO 1', 'P',             
+      'PERS. NATURAL', 'Y', 'CODIGO ASIGNADO POR SISTEMA', '999999999999', '', 'NID',            
+      --'9', 9, 'NID',             
+      'BG94101',101101,'99999','NID', @genEntFin, 9,            
+      --Modificado por MIA0            
+      CONVERT (SMALLDATETIME, '19000101'),               
+      9,'NID',CONVERT(DATETIME,'19000101'),0,@key_id_act_eco_94, --Añadido por MGD0             
+      '000000000' , 'I','19000101' , '19000101' ,'NID' ,'NID' , 'S' ,            
+      '10115' , 'M', '9' , '99','99','999','999','99',  --ZCS0 20110620            
+       CONVERT(DATETIME,'19000101'),CONVERT(DATETIME,'19000101'), 0, --Añadido por ZCS0          
+          '19000101' , '19000101',@genTipViv,0, --Añadido por ZCS0    
+          @genEco,  
+		  '9', --MOR0 20141013   
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------
+  'NID' ,'NO ESPECIFICA',@v_key_id_niv_edu, @v_key_id_est_civ -->c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ
+  ,'', '' ,'' , '' ,'' -->d_correo_electronico_info, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info
+  ,'' ,'' ,'' ,''  -->  d_conyugue_nombre_info, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info,
+  ,'' ,'' ,'' , '' -->  fl_conyugue_residente_info, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+  ,'' ,'' ,'' ,''  -->  d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info, d_refpersonal3_nombre_info,
+  ,'' ,'' ,'' ,'NID'  -->  d_refpersonal3_direccion_info, d_refpersonal3_telefono_info, d_nombre_emp_info, c_cargo_info,
+  ,'NO ESPECIFICA' ,'' , '' , '' ,@v_key_id_sit_lab --> d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info , fl_fun_publico_info, key_id_sit_lab,
+  ,'' , '' ,''  ,'' , '' ,@v_key_id_pai--> d_nit_info, fl_negocio_propio_info, fl_pep_info, d_cargo_pep_info , d_periodo_pep_info,key_id_pai
+  ,'00', 'NID','','','','NID','NO ESPECIFICA','NID','NO ESPECIFICA',0, @v_key_id_pai,--->d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+                                                  -->,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res
+---------------------------------------------------------------------------------------------------------------  
+        
+      CONVERT(SMALLDATETIME,'19000101') ,            
+   CONVERT(SMALLDATETIME,'19000101')
+     ,CONVERT(INT,0)  --key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0)-- [UpdateExisting]
+	,CONVERT(DATE,'19000101')-- AS [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [OldExpirationDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateExpirationDate]
+	,CONVERT(BIT,0) --[InsertNew]
+	,CONVERT(DATE,'19000101')-- AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101')-- AS [InsertExpirationDate]
+	,CONVERT(BIT,0)-- [OverwriteExisting]   
+     ) ,            
+     
+     ( @gen_BG94201,  --and ExpirationDate=CONVERT(SMALLDATETIME,'19000101')            
+      @genDCAL,@genDCALMAX,'GM9400000201', '999', '999', '94201204', 'CLIENTE GM94201', 'NID',             
+      'NID', 'CLIENTE GM94201', 'NID', 'NID', '999999', '999999',             
+      19000101, 9, 'CX', 'CLIENTE EXCLUSIVO', '999', 'NID', '999',             
+      'NID', '99999', 'NID', '9', 'NID', '999', 'NID',             
+      '999', 'NID', '8', 'INFORMACION NO REGISTRADA', 'N', 'NORMAL',              
+      'PG', 'GREMIO94', 'P', 'BANCA PERSONAL', '1', 'SUBSEGMENTO 1', 'P',             
+      'PERS. NATURAL', 'Y', 'CODIGO ASIGNADO POR SISTEMA', '999999999999', '', 'NID',            
+      --'9', 9, 'NID',             
+      'BG94201',201201,'99999','NID', @genEntFin, 9,    
+            
+      --Modificado por MIA0            
+      CONVERT (SMALLDATETIME, '19000101'),            
+      --            
+      9,'NID',CONVERT(DATETIME,'19000101'),0,@key_id_act_eco_94,      --Añadido por MGD0             
+      '000000000' , 'I','19000101' , '19000101' ,'NID' ,'NID' , 'S' ,            
+      '20115' , 'M', '9' , '99','99','999','999','99',  --ZCS0 20110620            
+       CONVERT(DATETIME,'19000101'),CONVERT(DATETIME,'19000101'), 0, --Añadido por ZCS0          
+          '19000101' , '19000101',@genTipViv,0, --Añadido por ZCS0      
+          @genEco, '9', --MOR0 20141013       
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------
+  'NID' ,'NO ESPECIFICA',@v_key_id_niv_edu, @v_key_id_est_civ -->c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ
+  ,'', '' ,'' , '' ,'' -->d_correo_electronico_info, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info
+  ,'' ,'' ,'' ,''  -->  d_conyugue_nombre_info, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info,
+  ,'' ,'' ,'' , '' -->  fl_conyugue_residente_info, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+  ,'' ,'' ,'' ,''  -->  d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info, d_refpersonal3_nombre_info,
+  ,'' ,'' ,'' ,'NID'  -->  d_refpersonal3_direccion_info, d_refpersonal3_telefono_info, d_nombre_emp_info, c_cargo_info,
+  ,'NO ESPECIFICA' ,'' , '' , '' ,@v_key_id_sit_lab --> d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info , fl_fun_publico_info, key_id_sit_lab,
+  ,'' , '' ,''  ,'' , '' ,@v_key_id_pai--> d_nit_info, fl_negocio_propio_info, fl_pep_info, d_cargo_pep_info , d_periodo_pep_info,key_id_pai
+  ,'00', 'NID','','','','NID','NO ESPECIFICA','NID','NO ESPECIFICA',0, @v_key_id_pai,--->d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+                                                  -->,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res
+---------------------------------------------------------------------------------------------------------------       
+      CONVERT(SMALLDATETIME,'19000101') ,            
+   CONVERT(SMALLDATETIME,'19000101') 
+    ,CONVERT(INT,0)  --key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0)-- [UpdateExisting]
+	,CONVERT(DATE,'19000101')-- AS [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [OldExpirationDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateExpirationDate]
+	,CONVERT(BIT,0) --[InsertNew]
+	,CONVERT(DATE,'19000101')-- AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101')-- AS [InsertExpirationDate]
+	,CONVERT(BIT,0)-- [OverwriteExisting]
+   ) ,            
+      ( @gen_BG94301, --and ExpirationDate=CONVERT(SMALLDATETIME,'19000101'            
+      @genDCAL,@genDCALMAX,'GM9400000301', '999', '999', '94301304', 'CLIENTE GM94301', 'NID',             
+      'NID', 'CLIENTE GM94301', 'NID', 'NID', '999999', '999999',             
+      19000101, 9, 'CX', 'CLIENTE EXCLUSIVO', '999', 'NID', '999',             
+      'NID', '99999', 'NID', '9', 'NID', '999', 'NID',             
+      '999', 'NID', '8', 'INFORMACION NO REGISTRADA', 'N', 'NORMAL',             
+      'PG', 'GREMIO94', 'P', 'BANCA PERSONAL', '1', 'SUBSEGMENTO 1', 'P',             
+      'PERS. NATURAL', 'Y', 'CODIGO ASIGNADO POR SISTEMA', '999999999999', '', 'NID',            
+      --'9', 9, 'NID',             
+      'BG94301',301301,'99999','NID', @genEntFin, 9,            
+      --Modificado por MIA0            
+      CONVERT (SMALLDATETIME, '19000101'),            
+      --            
+      9,'NID',CONVERT(DATETIME,'19000101'),0,@key_id_act_eco_94,      --Añadido por MGD0             
+      '000000000' , 'I','19000101' , '19000101' ,'NID' ,'NID' , 'S' ,            
+       '30115' , 'M', '9' , '99','99','999','999','99',  --ZCS0 20110620            
+       CONVERT(DATETIME,'19000101'),CONVERT(DATETIME,'19000101'), 0, --Añadido por ZCS0           
+          '19000101' , '19000101',@genTipViv,0, --Añadido por ZCS0     
+          @genEco,  '9', --MOR0 20141013        
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------
+  'NID' ,'NO ESPECIFICA',@v_key_id_niv_edu, @v_key_id_est_civ -->c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ
+  ,'', '' ,'' , '' ,'' -->d_correo_electronico_info, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info
+  ,'' ,'' ,'' ,''  -->  d_conyugue_nombre_info, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info,
+  ,'' ,'' ,'' , '' -->  fl_conyugue_residente_info, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+  ,'' ,'' ,'' ,''  -->  d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info, d_refpersonal3_nombre_info,
+  ,'' ,'' ,'' ,'NID'  -->  d_refpersonal3_direccion_info, d_refpersonal3_telefono_info, d_nombre_emp_info, c_cargo_info,
+  ,'NO ESPECIFICA' ,'' , '' , '' ,@v_key_id_sit_lab --> d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info , fl_fun_publico_info, key_id_sit_lab,
+  ,'' , '' ,''  ,'' , '' ,@v_key_id_pai--> d_nit_info, fl_negocio_propio_info, fl_pep_info, d_cargo_pep_info , d_periodo_pep_info,key_id_pai
+  ,'00', 'NID','','','','NID','NO ESPECIFICA','NID','NO ESPECIFICA',0, @v_key_id_pai,--->d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+                                                  -->,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res
+---------------------------------------------------------------------------------------------------------------        
+      CONVERT(SMALLDATETIME,'19000101') ,            
+   CONVERT(SMALLDATETIME,'19000101')
+    ,CONVERT(INT,0)  --key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0)-- [UpdateExisting]
+	,CONVERT(DATE,'19000101')-- AS [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [OldExpirationDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateExpirationDate]
+	,CONVERT(BIT,0) --[InsertNew]
+	,CONVERT(DATE,'19000101')-- AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101')-- AS [InsertExpirationDate]
+	,CONVERT(BIT,0)-- [OverwriteExisting]
+    ) ,            
+      ( @gen_BG94401,  --and ExpirationDate=CONVERT(SMALLDATETIME,'19000101'            
+      @genDCAL,@genDCALMAX,'GM9400000401', '999', '999', '94401404', 'CLIENTE GM94401', 'NID',             
+      'NID', 'CLIENTE GM94401', 'NID', 'NID', '999999', '999999',             
+      19000101, 9, 'CX', 'CLIENTE EXCLUSIVO', '999', 'NID', '999',             
+      'NID', '99999', 'NID', '9', 'NID', '999', 'NID',             
+      '999', 'NID', '8', 'INFORMACION NO REGISTRADA', 'N', 'NORMAL',             
+      'PG', 'GREMIO94', 'P', 'BANCA PERSONAL', '1', 'SUBSEGMENTO 1', 'P',             
+      'PERS. NATURAL', 'Y', 'CODIGO ASIGNADO POR SISTEMA', '999999999999', '', 'NID',            
+      --'9', 9, 'NID',             
+      'BG94401',401401,'99999','NID', @genEntFin, 9,            
+      --Modificado por MIA0            
+      CONVERT (SMALLDATETIME, '19000101'),            
+      --            
+     9,'NID',CONVERT(DATETIME,'19000101'),0,@key_id_act_eco_94,      --Añadido por MGD0             
+      '000000000' , 'I','19000101' , '19000101' ,'NID' ,'NID' , 'S' ,            
+       '40115' , 'M', '9' , '99','99','999','999','99',  --ZCS0 20110620            
+       CONVERT(DATETIME,'19000101'),CONVERT(DATETIME,'19000101'), 0, --Añadido por ZCS0           
+          '19000101' , '19000101',@genTipViv,0, --Añadido por ZCS0    
+          @genEco,  '9', --MOR0 20141013     
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------
+  'NID' ,'NO ESPECIFICA',@v_key_id_niv_edu, @v_key_id_est_civ -->c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ
+  ,'', '' ,'' , '' ,'' -->d_correo_electronico_info, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info
+  ,'' ,'' ,'' ,''  -->  d_conyugue_nombre_info, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info,
+  ,'' ,'' ,'' , '' -->  fl_conyugue_residente_info, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+  ,'' ,'' ,'' ,''  -->  d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info, d_refpersonal3_nombre_info,
+  ,'' ,'' ,'' ,'NID'  -->  d_refpersonal3_direccion_info, d_refpersonal3_telefono_info, d_nombre_emp_info, c_cargo_info,
+  ,'NO ESPECIFICA' ,'' , '' , '' ,@v_key_id_sit_lab --> d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info , fl_fun_publico_info, key_id_sit_lab,
+  ,'' , '' ,''  ,'' , '' ,@v_key_id_pai--> d_nit_info, fl_negocio_propio_info, fl_pep_info, d_cargo_pep_info , d_periodo_pep_info,key_id_pai
+  ,'00', 'NID','','','','NID','NO ESPECIFICA','NID','NO ESPECIFICA',0, @v_key_id_pai,--->d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+                                                  -->,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res
+---------------------------------------------------------------------------------------------------------------
+      CONVERT(SMALLDATETIME,'19000101') ,            
+   CONVERT(SMALLDATETIME,'19000101')
+    ,CONVERT(INT,0)  --key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0)-- [UpdateExisting]
+	,CONVERT(DATE,'19000101')-- AS [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [OldExpirationDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateExpirationDate]
+	,CONVERT(BIT,0) --[InsertNew]
+	,CONVERT(DATE,'19000101')-- AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101')-- AS [InsertExpirationDate]
+	,CONVERT(BIT,0)-- [OverwriteExisting]
+    ) ,            
+      (@gen_BG94501,  --and ExpirationDate=CONVERT(SMALLDATETIME,'19000101'            
+   @genDCAL,@genDCALMAX,'GM9400000501', '999', '999', '94501504', 'CLIENTE GM94501', 'NID',        
+      'NID', 'CLIENTE GM94501', 'NID', 'NID', '999999', '999999',             
+      19000101, 9, 'CX', 'CLIENTE EXCLUSIVO', '999', 'NID', '999',             
+      'NID', '99999', 'NID', '9', 'NID', '999', 'NID',             
+      '999', 'NID', '8', 'INFORMACION NO REGISTRADA', 'N', 'NORMAL',             
+      'PG', 'GREMIO94', 'P', 'BANCA PERSONAL', '1', 'SUBSEGMENTO 1', 'P',             
+      'PERS. NATURAL', 'Y', 'CODIGO ASIGNADO POR SISTEMA', '999999999999', '', 'NID',            
+      --'9', 9, 'NID',             
+      'BG94501',501501,'99999','NID', @genEntFin, 9,            
+      --Modificado por MIA0            
+      CONVERT (SMALLDATETIME, '19000101'),            
+      --            
+      9,'NID',CONVERT(DATETIME,'19000101'),0,@key_id_act_eco_94,      --Añadido por MGD0             
+      '000000000' , 'I','19000101' , '19000101' ,'NID' ,'NID' , 'S' ,            
+       '50115' , 'M', '9' , '99','99','999','999','99',  --ZCS0 20110620            
+       CONVERT(DATETIME,'19000101'),CONVERT(DATETIME,'19000101'), 0, --Añadido por ZCS0       
+          '19000101' , '19000101',@genTipViv,0, --Añadido por ZCS0   
+          @genEco,          
+		  '9', --MOR0 20141013    
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------
+  'NID' ,'NO ESPECIFICA',@v_key_id_niv_edu, @v_key_id_est_civ -->c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ
+  ,'', '' ,'' , '' ,'' -->d_correo_electronico_info, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info
+  ,'' ,'' ,'' ,''  -->  d_conyugue_nombre_info, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info,
+  ,'' ,'' ,'' , '' -->  fl_conyugue_residente_info, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+  ,'' ,'' ,'' ,''  -->  d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info, d_refpersonal3_nombre_info,
+  ,'' ,'' ,'' ,'NID'  -->  d_refpersonal3_direccion_info, d_refpersonal3_telefono_info, d_nombre_emp_info, c_cargo_info,
+  ,'NO ESPECIFICA' ,'' , '' , '' ,@v_key_id_sit_lab --> d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info , fl_fun_publico_info, key_id_sit_lab,
+  ,'' , '' ,''  ,'' , '' ,@v_key_id_pai--> d_nit_info, fl_negocio_propio_info, fl_pep_info, d_cargo_pep_info , d_periodo_pep_info,key_id_pai
+  ,'00', 'NID','','','','NID','NO ESPECIFICA','NID','NO ESPECIFICA',0, @v_key_id_pai,--->d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+                                                  -->,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res
+---------------------------------------------------------------------------------------------------------------	  
+      CONVERT(SMALLDATETIME,'19000101') ,            
+   CONVERT(SMALLDATETIME,'19000101')
+    ,CONVERT(INT,0)  --key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0)-- [UpdateExisting]
+	,CONVERT(DATE,'19000101')-- AS [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [OldExpirationDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateExpirationDate]
+	,CONVERT(BIT,0) --[InsertNew]
+	,CONVERT(DATE,'19000101')-- AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101')-- AS [InsertExpirationDate]
+	,CONVERT(BIT,0)-- [OverwriteExisting]
+    ) ,            
+      (@gen_BG94601,  --and ExpirationDate=CONVERT(SMALLDATETIME,'19000101'            
+      @genDCAL,@genDCALMAX,'GM9400000601', '999', '999', '94601604', 'CLIENTE GM94601', 'NID',             
+      'NID', 'CLIENTE GM94601', 'NID', 'NID', '999999', '999999',             
+      19000101, 9, 'CX', 'CLIENTE EXCLUSIVO', '999', 'NID', '999',             
+      'NID', '99999', 'NID', '9', 'NID', '999', 'NID',             
+      '999', 'NID', '8', 'INFORMACION NO REGISTRADA', 'N', 'NORMAL',              
+      'PG', 'GREMIO94', 'P', 'BANCA PERSONAL', '1', 'SUBSEGMENTO 1', 'P',             
+      'PERS. NATURAL', 'Y', 'CODIGO ASIGNADO POR SISTEMA', '999999999999', '', 'NID',            
+      --'9', 9, 'NID',             
+      'BG94601',601601,'99999','NID', @genEntFin, 9,            
+      --Modificado por MIA0                 
+      CONVERT (SMALLDATETIME, '19000101'),            
+      --            
+      9,'NID',CONVERT(DATETIME,'19000101'),0,@key_id_act_eco_94,      --Añadido por MGD0             
+      '000000000' , 'I','19000101' , '19000101' ,'NID' ,'NID' , 'S' ,            
+       '60115' , 'M', '9' , '99','99','999','999','99',  --ZCS0 20110620            
+       CONVERT(DATETIME,'19000101'),CONVERT(DATETIME,'19000101'), 0, --Añadido por ZCS0          
+          '19000101' , '19000101',@genTipViv,0, --Añadido por ZCS0     
+          @genEco,   '9', --MOR0 20141013      
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------
+  'NID' ,'NO ESPECIFICA',@v_key_id_niv_edu, @v_key_id_est_civ -->c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ
+  ,'', '' ,'' , '' ,'' -->d_correo_electronico_info, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info
+  ,'' ,'' ,'' ,''  -->  d_conyugue_nombre_info, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info,
+  ,'' ,'' ,'' , '' -->  fl_conyugue_residente_info, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+  ,'' ,'' ,'' ,''  -->  d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info, d_refpersonal3_nombre_info,
+  ,'' ,'' ,'' ,'NID'  -->  d_refpersonal3_direccion_info, d_refpersonal3_telefono_info, d_nombre_emp_info, c_cargo_info,
+  ,'NO ESPECIFICA' ,'' , '' , '' ,@v_key_id_sit_lab --> d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info , fl_fun_publico_info, key_id_sit_lab,
+  ,'' , '' ,''  ,'' , '' ,@v_key_id_pai--> d_nit_info, fl_negocio_propio_info, fl_pep_info, d_cargo_pep_info , d_periodo_pep_info,key_id_pai
+  ,'00', 'NID','','','','NID','NO ESPECIFICA','NID','NO ESPECIFICA',0, @v_key_id_pai,--->d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+                                                  -->,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res
+---------------------------------------------------------------------------------------------------------------         
+      CONVERT(SMALLDATETIME,'19000101') ,            
+   CONVERT(SMALLDATETIME,'19000101') 
+    ,CONVERT(INT,0)  --key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0)-- [UpdateExisting]
+	,CONVERT(DATE,'19000101')-- AS [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [OldExpirationDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateExpirationDate]
+	,CONVERT(BIT,0) --[InsertNew]
+	,CONVERT(DATE,'19000101')-- AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101')-- AS [InsertExpirationDate]
+	,CONVERT(BIT,0)-- [OverwriteExisting]   
+   ) ,            
+      ( @gen_BG94701,  --and ExpirationDate=CONVERT(SMALLDATETIME,'19000101'            
+      @genDCAL,@genDCALMAX,'GM9400000701', '999', '999', '94701704', 'CLIENTE GM94701', 'NID',             
+      'NID', 'CLIENTE GM94701', 'NID', 'NID', '999999', '999999',             
+      19000101, 9, 'CX', 'CLIENTE EXCLUSIVO', '999', 'NID', '999',             
+      'NID', '99999', 'NID', '9', 'NID', '999', 'NID',             
+      '999', 'NID', '8', 'INFORMACION NO REGISTRADA', 'N', 'NORMAL',             
+      'PG', 'GREMIO94', 'P', 'BANCA PERSONAL', '1', 'SUBSEGMENTO 1', 'P',             
+      'PERS. NATURAL', 'Y', 'CODIGO ASIGNADO POR SISTEMA', '999999999999', '', 'NID',            
+      --'9', 9, 'NID',             
+      'BG94701',701701,'99999','NID', @genEntFin, 9,            
+      --Modificado por MIA0            
+      CONVERT (SMALLDATETIME, '19000101'),            
+      --            
+      9,'NID',CONVERT(DATETIME,'19000101'),0,@key_id_act_eco_94,      --Añadido por MGD0             
+      '000000000' , 'I','19000101' , '19000101' ,'NID' ,'NID' , 'S' ,            
+       '70115' , 'M', '9' , '99','99','999','999','99',  --ZCS0 20110620            
+    CONVERT(DATETIME,'19000101'),CONVERT(DATETIME,'19000101'), 0, --Añadido por ZCS0           
+          '19000101' , '19000101',@genTipViv,0, --Añadido por ZCS0       
+          @genEco, 
+		  '9', --MOR0 20141013
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------
+  'NID' ,'NO ESPECIFICA',@v_key_id_niv_edu, @v_key_id_est_civ -->c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ
+  ,'', '' ,'' , '' ,'' -->d_correo_electronico_info, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info
+  ,'' ,'' ,'' ,''  -->  d_conyugue_nombre_info, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info,
+  ,'' ,'' ,'' , '' -->  fl_conyugue_residente_info, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+  ,'' ,'' ,'' ,''  -->  d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info, d_refpersonal3_nombre_info,
+  ,'' ,'' ,'' ,'NID'  -->  d_refpersonal3_direccion_info, d_refpersonal3_telefono_info, d_nombre_emp_info, c_cargo_info,
+  ,'NO ESPECIFICA' ,'' , '' , '' ,@v_key_id_sit_lab --> d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info , fl_fun_publico_info, key_id_sit_lab,
+  ,'' , '' ,''  ,'' , '' ,@v_key_id_pai--> d_nit_info, fl_negocio_propio_info, fl_pep_info, d_cargo_pep_info , d_periodo_pep_info,key_id_pai
+  ,'00', 'NID','','','','NID','NO ESPECIFICA','NID','NO ESPECIFICA',0, @v_key_id_pai,--->d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+                                                  -->,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res
+--------------------------------------------------------------------------------------------------------------- 
+      CONVERT(SMALLDATETIME,'19000101') ,            
+   CONVERT(SMALLDATETIME,'19000101')
+    ,CONVERT(INT,0)  --key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0)-- [UpdateExisting]
+	,CONVERT(DATE,'19000101')-- AS [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [OldExpirationDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateExpirationDate]
+	,CONVERT(BIT,0) --[InsertNew]
+	,CONVERT(DATE,'19000101')-- AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101')-- AS [InsertExpirationDate]
+	,CONVERT(BIT,0)-- [OverwriteExisting]
+   ) ,            
+      ( @gen_BG94801, --and ExpirationDate=CONVERT(SMALLDATETIME,'19000101'            
+      @genDCAL,@genDCALMAX,'GM9400000801', '999', '999', '94801804', 'CLIENTE GM94801', 'NID',             
+      'NID', 'CLIENTE GM94801', 'NID', 'NID', '999999', '999999',             
+      19000101, 9, 'CX', 'CLIENTE EXCLUSIVO', '999', 'NID', '999',             
+      'NID', '99999', 'NID', '9', 'NID', '999', 'NID',             
+      '999', 'NID', '8', 'INFORMACION NO REGISTRADA', 'N', 'NORMAL',             
+      'PG', 'GREMIO94', 'P', 'BANCA PERSONAL', '1', 'SUBSEGMENTO 1', 'P',             
+      'PERS. NATURAL', 'Y', 'CODIGO ASIGNADO POR SISTEMA', '999999999999', '', 'NID',            
+      --'9', 9, 'NID',             
+      'BG94801',801801,'99999','NID', @genEntFin, 9,            
+      --Modificado por MIA0            
+      CONVERT (SMALLDATETIME, '19000101'),            
+      --            
+      9,'NID',CONVERT(DATETIME,'19000101'),0,      --Añadido por MGD0              
+       @genEco, '0' , 'I','19000101' , '19000101' ,'NID' ,'NID' ,'S' ,            
+                   
+       '80115' , 'M', '9' , '99','99','999','999','99',  --ZCS0 20110620            
+       CONVERT(DATETIME,'19000101'),CONVERT(DATETIME,'19000101'), 0, --Añadido por ZCS0            
+          '19000101' , '19000101',@genTipViv,0, --Añadido por ZCS0  
+          @genEco,          
+		  '9', --MOR0 20141013
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------
+  'NID' ,'NO ESPECIFICA',@v_key_id_niv_edu, @v_key_id_est_civ -->c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ
+  ,'', '' ,'' , '' ,'' -->d_correo_electronico_info, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info
+  ,'' ,'' ,'' ,''  -->  d_conyugue_nombre_info, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info,
+  ,'' ,'' ,'' , '' -->  fl_conyugue_residente_info, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+  ,'' ,'' ,'' ,''  -->  d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info, d_refpersonal3_nombre_info,
+  ,'' ,'' ,'' ,'NID'  -->  d_refpersonal3_direccion_info, d_refpersonal3_telefono_info, d_nombre_emp_info, c_cargo_info,
+  ,'NO ESPECIFICA' ,'' , '' , '' ,@v_key_id_sit_lab --> d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info , fl_fun_publico_info, key_id_sit_lab,
+  ,'' , '' ,''  ,'' , '' ,@v_key_id_pai--> d_nit_info, fl_negocio_propio_info, fl_pep_info, d_cargo_pep_info , d_periodo_pep_info,key_id_pai
+  ,'00', 'NID','','','','NID','NO ESPECIFICA','NID','NO ESPECIFICA',0, @v_key_id_pai,--->d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+                                                  -->,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res
+---------------------------------------------------------------------------------------------------------------	  
+      CONVERT(SMALLDATETIME,'19000101') ,            
+   CONVERT(SMALLDATETIME,'19000101') 
+    ,CONVERT(INT,0)  --key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0)-- [UpdateExisting]
+	,CONVERT(DATE,'19000101')-- AS [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [OldExpirationDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateExpirationDate]
+	,CONVERT(BIT,0) --[InsertNew]
+	,CONVERT(DATE,'19000101')-- AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101')-- AS [InsertExpirationDate]
+	,CONVERT(BIT,0)-- [OverwriteExisting]   
+   ) ,            
+    ( @gen_BG94901, --and ExpirationDate=CONVERT(SMALLDATETIME,'19000101'            
+      @genDCAL,@genDCALMAX,'GM9400000901', '999', '999', '94901904', 'CLIENTE GM94901', 'NID',             
+      'NID', 'CLIENTE GM94901', 'NID', 'NID', '999999', '999999',             
+      19000101, 9, 'CX', 'CLIENTE EXCLUSIVO', '999', 'NID', '999',             
+      'NID', '99999', 'NID', '9', 'NID', '999', 'NID',             
+      '999', 'NID', '8', 'INFORMACION NO REGISTRADA', 'N', 'NORMAL',             
+      'PG', 'GREMIO94', 'P', 'BANCA PERSONAL', '1', 'SUBSEGMENTO 1', 'P',             
+      'PERS. NATURAL', 'Y', 'CODIGO ASIGNADO POR SISTEMA', '999999999999', '', 'NID',            
+      --'9', 9, 'NID',             
+      'BG94901',901901,'99999','NID', @genEntFin, 9,          
+      --Modificado por MIA0            
+      CONVERT (SMALLDATETIME, '19000101'),            
+      --            
+      9,'NID',CONVERT(DATETIME,'19000101'),0,      --Añadido por MGD0              
+       @genEco, '0' , 'I','19000101' , '19000101' ,'NID' ,'NID' ,'S' ,            
+       '90115' , 'M', '9' , '99','99','999','999','99',  --ZCS0 20110620            
+       CONVERT(DATETIME,'19000101'),CONVERT(DATETIME,'19000101'), 0, --Añadido por ZCS0            
+          '19000101' , '19000101',@genTipViv,0, --Añadido por ZCS0    
+          @genEco,  
+		  '9', --MOR0 20141013      
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------
+  'NID' ,'NO ESPECIFICA',@v_key_id_niv_edu, @v_key_id_est_civ -->c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ
+  ,'', '' ,'' , '' ,'' -->d_correo_electronico_info, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info
+  ,'' ,'' ,'' ,''  -->  d_conyugue_nombre_info, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info,
+  ,'' ,'' ,'' , '' -->  fl_conyugue_residente_info, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+  ,'' ,'' ,'' ,''  -->  d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info, d_refpersonal3_nombre_info,
+  ,'' ,'' ,'' ,'NID'  -->  d_refpersonal3_direccion_info, d_refpersonal3_telefono_info, d_nombre_emp_info, c_cargo_info,
+  ,'NO ESPECIFICA' ,'' , '' , '' ,@v_key_id_sit_lab --> d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info , fl_fun_publico_info, key_id_sit_lab,
+  ,'' , '' ,''  ,'' , '' ,@v_key_id_pai--> d_nit_info, fl_negocio_propio_info, fl_pep_info, d_cargo_pep_info , d_periodo_pep_info,key_id_pai
+  ,'00', 'NID','','','','NID','NO ESPECIFICA','NID','NO ESPECIFICA',0, @v_key_id_pai,--->d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+                                                  -->,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res
+---------------------------------------------------------------------------------------------------------------     		  
+      CONVERT(SMALLDATETIME,'19000101') ,            
+     CONVERT(SMALLDATETIME,'19000101')
+    ,CONVERT(INT,0)  --key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0)-- [UpdateExisting]
+	,CONVERT(DATE,'19000101')-- AS [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [OldExpirationDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateExpirationDate]
+	,CONVERT(BIT,0) --[InsertNew]
+	,CONVERT(DATE,'19000101')-- AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101')-- AS [InsertExpirationDate]
+	,CONVERT(BIT,0)-- [OverwriteExisting]
+   )             
+
+
+/**************************************************************************************************            
+Modificado  por MIA0            
+            
+Actualización del campo f_fec_reg_bio con el dato de la fecha de registro             
+al Biométrico de la tabla de Clientes de BCPImages.            
+***************************************************************************************************/            
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','ACTUALIZACION DICCIONARIO 4 INI',GETDATE())
+            
+UPDATE #DIM_CLI_FINAL             
+SET f_fec_reg_bio = CLI.FechaReg            
+FROM  #DIM_CLI_FINAL DIM 
+INNER JOIN BcpImg.Cliente CLI            
+ON DIM.c_cic = CLI.CIC --AND (DIM.c_idc + DIM.c_tip_idc + DIM.c_ext_idc) = CLI.IDC             
+              
+/*************************************************************************************************/               
+            
+--=====================================MGD0=======================================            
+-- Descripción: Actualización de los campos fl_est_ibk, c_ult_usu_ibk, f_fec_cre_ibk y fl_ibk apartir de la tabla        
+-- Ibk.TIBK_CLIENTES            
+--================================================================================            
+            
+--9,'NID',CONVERT(DATETIME,'19000101'),0            
+IF OBJECT_ID('tempdb..#TIBK_CLIENTES') is not NULL DROP TABLE #TIBK_CLIENTES            
+
+SELECT CIC_NV,FECHA_CREACION_DT,ULTIMO_USUARIO_NV,ESTADO_BT,ROW_NUMBER()OVER( PARTITION BY CIC_NV ORDER BY FECHA_CREACION_DT DESC) AS ROW_CLI
+INTO #TIBK_CLIENTES
+FROM Ibk.TIBK_CLIENTES
+            
+UPDATE #DIM_CLI_FINAL             
+SET fl_est_ibk = ISNULL(CLIBK.ESTADO_BT, 9),            
+  c_ult_usu_ibk = ISNULL(CLIBK.ULTIMO_USUARIO_NV,'NID'),            
+  f_fec_cre_ibk = ISNULL(CLIBK.FECHA_CREACION_DT,CONVERT(DATETIME,'19000101')),            
+  fl_ibk = 1            
+FROM  #DIM_CLI_FINAL DCF             
+INNER JOIN #TIBK_CLIENTES CLIBK ON DCF.c_cic = CLIBK.CIC_NV     
+WHERE CLIBK.ROW_CLI='1'        
+
+
+           
+--*****************************************************************************************            
+--Añadido por ZCS0            
+--Descripción: Se añaden los campos f_fec_des_neg,f_fec_ult_ing_neg,fl_neg            
+-- de Archivo Negativo            
+--*****************************************************************************************                            
+--IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'#ANEG_CLIENTE]') AND type in (N'U'))            
+IF OBJECT_ID('tempdb..#ANEG_CLIENTE') is not NULL DROP TABLE #ANEG_CLIENTE            
+            
+SELECT DISTINCT * INTO #ANEG_CLIENTE            
+FROM  BD_STAGEBCP.Arneg.CLIENTE            
+
+
+UPDATE #DIM_CLI_FINAL             
+SET f_fec_des_neg   =ISNULL(ANEG.Fecha_descargo,CONVERT(DATETIME,'19000101')),            
+ f_fec_ult_ing_neg =ISNULL(ANEG.Fec_ultm_ing,CONVERT(DATETIME,'19000101')),            
+ fl_neg =1,
+ c_est_neg= Estado_Cliente    -- 20141013 MOR0       
+FROM  #DIM_CLI_FINAL DCF INNER JOIN #ANEG_CLIENTE ANEG             
+ON LTRIM(RTRIM(DCF.c_cic))=LTRIM(RTRIM(ANEG.cic))            
+            
+-----FIN Añadido ZCS0            
+
+PRINT N'ACTUALIZACION PERSONAL FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                                      
+
+PRINT N'ACTUALIZACION RIESGOS INI  ' + CONVERT(NVARCHAR(23),GETDATE(),126)                                      		  
+	UPDATE #DIM_CLI_FINAL SET 
+							  c_est_civ = SC.c_est_civ,
+							  d_des_est_civ = SC.d_des_est_civ,
+							  c_ocu = SC.c_ocu,
+							  d_des_ocu = SC.d_des_ocu,
+							  c_prf = SC.c_prf,
+							  d_des_prf = SC.d_des_prf,
+							  c_cod_niv_edu = SC.c_cod_niv_edu,
+							  d_des_cod_niv_edu = SC.d_des_cod_niv_edu,
+							  c_nro_dep=ISNULL(nro_dep,0),        
+							  key_id_tip_viv=ISNULL(DTIPV.key_id_tip_viv,@genTipViv)
+							    
+    FROM #DIM_CLI_FINAL D 
+	INNER JOIN UsrBD_DWH.Tmp_Cliente_complemento SC
+    ON LTRIM(RTRIM(D.c_cic)) = LTRIM(RTRIM(SC.c_cic))
+    LEFT OUTER JOIN BD_DWBCP.Dwh.Dim_tipo_vivienda DTIPV 
+    ON SC.key_id_tip_viv = DTIPV.key_id_tip_viv
+    WHERE SC.fecha = @v_fecha
+	--select * from UsrBD_DWH.Tmp_Cliente_complemento
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------  
+----*********************************************************************************************************    
+-- Adición de los datos requeridos para el cubo de riesgos  
+----*********************************************************************************************************   
+  --Modif MIA0-25/12/2011  
+  ALTER TABLE #DIM_CLI_FINAL ADD  d_des_seg_cli_rie char (10) DEFAULT ('NID')  
+    
+  DECLARE @FEC_MAX_PDH CHAR(6)  
+  SET @FEC_MAX_PDH = (SELECT MAX(PERIODO) FROM MKTxt.TDE_COSE_BASEPDH WHERE ISNULL(LTRIM(PERIODO),'')<>'' )  
+    
+  IF OBJECT_ID('tempdb..#TMPBASEPDH') is not NULL DROP TABLE #TMPBASEPDH  
+  SELECT *  
+  INTO #TMPBASEPDH  
+  FROM MKTxt.TDE_COSE_BASEPDH   
+  WHERE LTRIM(RTRIM(PERIODO))=@FEC_MAX_PDH AND (LTRIM(RTRIM(CICEMPRESA)) NOT IN (SELECT LTRIM(RTRIM(d_prm1)) FROM BD_DWBCP.Dwh.Dim_DicDWH WHERE c_cod_tip_dat='SOLEPR' AND c_cod_fue ='GENEPR')  
+   OR LTRIM(RTRIM(CICEMPRESA)) LIKE 'GM94%')  
+     
+  UPDATE #DIM_CLI_FINAL SET d_des_seg_cli_rie = CASE WHEN ISNULL(LTRIM(PDH.CICCLIENTE),'')='' THEN   
+              CASE WHEN LTRIM(RTRIM(c_tip_cli)) IN ('CX','VP') THEN 'PREMIUM'  
+               ELSE 'NORMAL' END  
+             ELSE CASE WHEN LTRIM(RTRIM(c_tip_cli)) IN ('CX','VP') THEN 'PREMIUM'  
+               ELSE 'PDH' END  
+             END  
+  FROM #DIM_CLI_FINAL CLI LEFT OUTER JOIN #TMPBASEPDH PDH   
+  ON LTRIM(RTRIM(CLI.c_cic))= LTRIM(RTRIM(PDH.CICCLIENTE))  
+  WHERE c_cic <> '999999999999' AND c_idc<>'999999999999'  
+   
+     UPDATE #DIM_CLI_FINAL SET d_des_seg_cli_rie ='NID'  
+     WHERE ISNULL(LTRIM(d_des_seg_cli_rie),'')=''  
+       
+     UPDATE #DIM_CLI_FINAL SET d_des_seg_cli_rie = LTRIM(RTRIM(d_des_seg_cli_rie))  
+
+------------------------------------------------------------------------------------------------------------------------------>correr hasta aca
+    
+----Cliente ERROR -MIA0 20120904           
+            
+INSERT INTO #DIM_CLI_FINAL             
+VALUES ( @errPERBCP, @errDCAL, @errDCAL,'888888888888', '888', '888', '888888888888', 'ERROR', 'ERROR',             
+      'ERROR', 'ERROR', 'ERROR', 'ERROR', '888888', '888888',             
+      19000101, 8, '88', 'ERROR', '888', 'ERROR', '888',             
+      'ERROR', '88888', 'ERROR', '8', 'ERROR', '888', 'ERROR',             
+      '888', 'ERROR', '888', 'ERROR', '888', 'ERROR',             
+      '888888', 'ERROR', '888', 'ERROR', '88888', 'ERROR', '8',             
+      'ERROR', '8', 'ERROR', '888888888888', '888', 'ERROR', '888888888888',            
+      --'9', 9, 'NID',             
+      888888,'88888','ERROR', @errEntFin, 8,            
+      --Modificado por MIA0            
+      CONVERT (SMALLDATETIME, '19000101'),            
+      --            
+      8,'ERROR',CONVERT(DATETIME,'19000101'), 8,      --Añadido por MGD0            
+      @errEco , 'ERROR' , '8','19000101' , '19000101' ,'ERROR' ,'ERROR' ,'8' ,'ERROR' , '8', '8' , '88','88' ,'888','888','88' --ZCS0 20110620            
+      , CONVERT(DATETIME,'19000101'),CONVERT(DATETIME,'19000101'), 8, --Añadido por ZCS0          
+        '19000101' , '19000101',@errTipViv,0, --Añadido por ZCS0     
+        @errEco,      
+		'8', --MOR0 20141013
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------
+  'NID' ,'NO ESPECIFICA',@v_key_id_niv_edu, @v_key_id_est_civ -->c_prf_info, d_des_prf_info, key_id_niv_edu, key_id_est_civ
+  ,'', '' ,'' , '' ,'' -->d_correo_electronico_info, d_telefono_info, d_celular_info, fl_residente_info, c_conyugue_idc_info
+  ,'' ,'' ,'' ,''  -->  d_conyugue_nombre_info, d_conyugue_ape_pat_info, d_conyugue_ape_mat_info, c_conyugue_nac_info,
+  ,'' ,'' ,'' , '' -->  fl_conyugue_residente_info, d_refpersonal1_nombre_info, d_refpersonal1_direccion_info, d_refpersonal1_telefono_info
+  ,'' ,'' ,'' ,''  -->  d_refpersonal2_nombre_info, d_refpersonal2_direccion_info, d_refpersonal2_telefono_info, d_refpersonal3_nombre_info,
+  ,'' ,'' ,'' ,'NID'  -->  d_refpersonal3_direccion_info, d_refpersonal3_telefono_info, d_nombre_emp_info, c_cargo_info,
+  ,'NO ESPECIFICA' ,'' , '' , '' ,@v_key_id_sit_lab --> d_des_cargo_info, d_telefono_emp_info, d_correo_electronico_emp_info , fl_fun_publico_info, key_id_sit_lab,
+  ,'' , '' ,''  ,'' , '' ,@v_key_id_pai--> d_nit_info, fl_negocio_propio_info, fl_pep_info, d_cargo_pep_info , d_periodo_pep_info,key_id_pai
+  ,'00', 'NID','','','','NID','NO ESPECIFICA','NID','NO ESPECIFICA',0, @v_key_id_pai,--->d_complemento_idc_info ,c_residencia_pais_info, d_fax_info, d_interno_emp_info, d_fec_ingreso_trabajo_info
+                                                  -->,c_actividad_info, d_actividad_info, c_ciiu_info, d_ciiu_info, i_salario_info, key_id_pai_res
+---------------------------------------------------------------------------------------------------------------
+      CONVERT(SMALLDATETIME,GETDATE()),            
+   CONVERT(SMALLDATETIME,'19000101')
+   ,CONVERT(INT,0)  --key_id_cli_orig --MOR020140611
+	,CONVERT(BIT,0)-- [UpdateExisting]
+	,CONVERT(DATE,'19000101')-- AS [OldEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [OldExpirationDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateEffectiveDate]
+	,CONVERT(DATE,'19000101') --AS [UpdateExpirationDate]
+	,CONVERT(BIT,0) --[InsertNew]
+	,CONVERT(DATE,'19000101')-- AS [InsertEffectiveDate]
+	,CONVERT(DATE,'19000101')-- AS [InsertExpirationDate]
+	,CONVERT(BIT,0)-- [OverwriteExisting]
+	,'ERROR'
+    )        
+PRINT N'ACTUALIZACION RIESGOS FIN  ' + CONVERT(NVARCHAR(23),GETDATE(),126)       
+ 
+ INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','ACTUALIZACION DICCIONARIO 4 FIN',GETDATE())
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','DESHABILITA INDICES INI',GETDATE())
+
+----------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+ALTER INDEX IDX_DIMCLI_CIC  ON BD_DWBCP.Dwh.Dim_cliente
+DISABLE;
+
+ALTER INDEX IDX_DIMCLI_EXPEFE ON BD_DWBCP.Dwh.Dim_cliente
+DISABLE;
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','DESHABILITA INDICES FIN',GETDATE())
+
+--PRINT @genDAGE        
+--DECLARE @v_fecha VARCHAR(8)      
+--SET @v_fecha=(SELECT MAX(CL_FECEXTRACCION) FROM Repxt.TBLDBC)      
+
+DECLARE @v_fecha_date DATE      
+SET @v_fecha_date = CONVERT(DATE,@v_fecha); 
+     
+DECLARE @fechaInicioBatchABI datetime;
+DECLARE @fechaInicioSectionABI datetime;
+DECLARE @fechaInicioStatementABI datetime;
+
+DECLARE @fechaFinBatchABI datetime;
+DECLARE @fechaFinSectionABI datetime;
+DECLARE @fechaFinStatementABI datetime;
+
+DECLARE @elapsedBatch int;
+DECLARE @elapsedSection int;
+DECLARE @elapsedStatement int;
+
+SET @fechaInicioBatchABI = GETDATE();
+
+SET @fechaInicioSectionABI = GETDATE();
+SET @fechaInicioStatementABI = @fechaInicioSectionABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaInicioSectionABI);
+
+
+PRINT 'Inicio | CLUSTERED INDEX - #DIM_CLI_FINAL |' + CONVERT(NVARCHAR(23),@fechaInicioSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|0|0|';
+
+CREATE CLUSTERED INDEX IX_DIM_OPE_FINAL_CLI_CIC ON #DIM_CLI_FINAL (c_cic);
+
+SET @fechaFinStatementABI = GETDATE();
+SET @fechaFinSectionABI = @fechaFinStatementABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinStatementABI);
+SET @elapsedSection = DATEDIFF(millisecond,@fechaInicioSectionABI,@fechaFinSectionABI);
+SET @elapsedStatement = DATEDIFF(millisecond,@fechaInicioStatementABI,@fechaFinStatementABI);
+
+PRINT N'Fin | CLUSTERED INDEX - #DIM_CLI_FINAL |' + CONVERT(NVARCHAR(23),@fechaFinStatementABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|' + CONVERT(NVARCHAR(10),@elapsedSection) + N'|' + CONVERT(NVARCHAR(10),@elapsedStatement) + N'|';
+
+--/* **********Preparacion de la tabla #DIM_CLI_FINAL con los campos faltantes.*********** */
+
+--PREMISAS (VERIFICAR QUE SE CUMPLAN)
+--Para cada combinacion existente de c_ope,c_apli, y c_dig_ver, los rangos de fechas de los registros no se solapan y son continuos: todas las fechas desde la minima EffectiveDate hasta la maxima ExpirationDate para cada combinacion estan contenidas en el rango de al menos uno y solo un registro.
+--El update de un registro existente va a cambiar unicamente el rango de EffectiveDate-ExpirationDate, y el resto de los campos quedan iguales.
+
+--DESCRIPCION
+--Cada registro en #DIM_CLI_FINAL puede generar cuatro acciones: solamente update, solamente insert, update e insert, y sin cambios.
+
+--Por cada registro se agregan los siguientes campos para soportar las cuatro acciones anteriores:
+
+--Campos para UPDATE
+--UpdateExisting: campo bit que indica que se va a realizar un update de un registro existente.
+--OldEffectiveDate: en el caso en que haya que hacer update va a indicar el valor antiguo de EffectiveDate del registro a actualizar, para poder hacer el JOIN antes de modificarlo.
+--OldExpirationDate: en el caso en que haya que hacer update va a indicar el valor antiguo de ExpirationDate del registro a actualizar, para poder hacer el JOIN antes de modificarlo.
+--UpdateEffectiveDate: en el caso en que haya que hacer update va a indicar el nuevo valor EffectiveDate del registro a actualizar.
+--UpdateExpirationDate: en el caso en que haya que hacer update va a indicar el nuevo valor de ExpirationDate del registro a actualizar.
+
+--Campos para INSERT
+--InsertNew: campo bit que indica que se va a realizar un insert de un nuevo registro.
+--InsertEffectiveDate: en el caso en que haya que hacer insert va a indicar el valor de EffectiveDate del nuevo registro a insertar.
+--InsertExpirationDate: en el caso en que haya que hacer insert va a indicar el valor de ExpirationDate del nuevo registro a insertar.
+
+
+SET @fechaInicioSectionABI = GETDATE();
+SET @fechaInicioStatementABI = @fechaInicioSectionABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaInicioSectionABI);
+
+PRINT N'Inicio | UPDATE - #DIM_CLI_FINAL - BD_DWBCP.Dwh.Dim_cliente INTERMEDIOS CON CAMBIOS |' + CONVERT(NVARCHAR(23),@fechaInicioSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|0|0|';
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UPDATE - #DIM_CLI_FINAL - BD_DWBCP.Dwh.Dim_cliente INTERMEDIOS CON CAMBIOS INI',GETDATE())
+
+UPDATE Destino
+SET
+	Destino.UpdateExisting = CASE WHEN Origen.EffectiveDate <> Origen.ExpirationDate THEN 1 ELSE 0 END
+	,Destino.OldEffectiveDate = Origen.EffectiveDate
+	,Destino.OldExpirationDate = Origen.ExpirationDate
+	,Destino.UpdateEffectiveDate = CASE WHEN @v_fecha_date < Origen.ExpirationDate THEN DATEADD(day, 1, @v_fecha_date) ELSE Origen.EffectiveDate END
+	,Destino.UpdateExpirationDate = CASE WHEN @v_fecha_date < Origen.ExpirationDate THEN Origen.ExpirationDate ELSE DATEADD(day, -1, @v_fecha_date) END
+	,Destino.InsertNew = CASE WHEN Origen.EffectiveDate <> Origen.ExpirationDate THEN 1 ELSE 0 END
+	,Destino.InsertEffectiveDate = CASE WHEN @v_fecha_date < Origen.ExpirationDate THEN Origen.EffectiveDate ELSE @v_fecha_date END
+	,Destino.InsertExpirationDate = @v_fecha_date
+	,Destino.OverwriteExisting = CASE WHEN Origen.EffectiveDate <> Origen.ExpirationDate THEN 0 ELSE 1 END	
+	,key_id_cli_orig=key_id_cli --MOR020140217
+FROM #DIM_CLI_FINAL Destino 
+INNER JOIN BD_DWBCP.Dwh.Dim_cliente Origen
+	ON Destino.c_cic = Origen.c_cic	
+WHERE @v_fecha_date BETWEEN Origen.EffectiveDate AND Origen.ExpirationDate
+   AND (( Origen.c_ext_idc <> Destino.c_ext_idc)            
+       OR ( Origen.c_idc <> Destino.c_idc)            
+       OR ( Origen.d_ape_pat <> Destino.d_ape_pat)            
+       OR ( Origen.d_ape_mat <> Destino.d_ape_mat)            
+       OR ( Origen.d_des_ext_idc <> Destino.d_des_ext_idc)            
+       OR ( Origen.c_nac <> Destino.c_nac)            
+       OR ( Origen.c_fin_soc <> Destino.c_fin_soc)            
+       OR ( Origen.d_nom <> Destino.d_nom)            
+       OR ( Origen.d_nom_cli <> Destino.d_nom_cli)            
+       OR ( Origen.d_des_nac <> Destino.d_des_nac)            
+       OR ( Origen.d_des_fin_soc <> Destino.d_des_fin_soc)            
+       OR ( Origen.c_pri_pro_pas_ape <> Destino.c_pri_pro_pas_ape)            
+       OR ( Origen.c_pri_pro_act_ape <> Destino.c_pri_pro_act_ape)            
+       --OR ( Origen.f_fec_nac <> Destino.f_fec_nac)            
+       OR ( Origen.fl_pdh <> Destino.fl_pdh)            
+       OR ( Origen.c_tip_cli <> Destino.c_tip_cli)            
+       OR ( Origen.d_des_tip_cli <> Destino.d_des_tip_cli)            
+       OR ( Origen.c_est_civ <> Destino.c_est_civ)            
+       OR ( Origen.d_des_est_civ <> Destino.d_des_est_civ)            
+       OR ( Origen.c_ocu <> Destino.c_ocu)            
+       OR ( Origen.d_des_ocu <> Destino.d_des_ocu)            
+       OR ( Origen.c_prf <> Destino.c_prf)            
+       OR ( Origen.d_des_prf <> Destino.d_des_prf)            
+       --OR ( Origen.c_sex <> Destino.c_sex)  --Cambio MPR0 02/02/2011             
+       --OR ( Origen.d_des_sex <> Destino.d_des_sex) --Cambio MPR0 02/02/2011             
+       OR ( Origen.c_cod_niv_edu <> Destino.c_cod_niv_edu)            
+       OR ( Origen.d_des_cod_niv_edu <> Destino.d_des_cod_niv_edu)            
+  OR ( Origen.c_cod_niv_soc_eco <> Destino.c_cod_niv_soc_eco)            
+       OR ( Origen.d_des_cod_niv_soc_eco <> Destino.d_des_cod_niv_soc_eco)            
+       OR ( Origen.c_mag <> Destino.c_mag)            
+       OR ( Origen.d_des_mag <> Destino.d_des_mag)            
+       OR ( Origen.c_sta <> Destino.c_sta)            
+       OR ( Origen.d_des_sta <> Destino.d_des_sta)            
+       OR ( Origen.c_seg <> Destino.c_seg)            
+       OR ( Origen.d_des_seg <> Destino.d_des_seg)            
+       OR ( Origen.c_ban <> Destino.c_ban)            
+       OR ( Origen.d_des_ban <> Destino.d_des_ban)            
+       OR ( Origen.c_sub_seg <> Destino.c_sub_seg)            
+       OR ( Origen.d_des_sub_seg <> Destino.d_des_sub_seg)            
+       OR ( Origen.c_tip_per <> Destino.c_tip_per)            
+       OR ( Origen.d_des_tip_per <> Destino.d_des_tip_per)            
+       OR ( Origen.c_tip_idc <> Destino.c_tip_idc)            
+       OR ( Origen.d_des_tip_idc <> Destino.d_des_tip_idc)            
+       OR ( Origen.d_des_nit <> Destino.d_des_nit)            
+       --OR ( Origen.c_cal <> Destino.c_cal)            
+       --OR ( Origen.c_max_cal <> Destino.c_max_cal)            
+       --OR ( Origen.d_des_cal <> Destino.d_des_cal)            
+       OR ( Origen.c_age <> Destino.c_age)            
+       OR ( Origen.c_seg_mkt <> Destino.c_seg_mkt)            
+       OR ( Origen.d_seg_mkt <> Destino.d_seg_mkt)            
+       OR ( Origen.key_id_ent_fin <> Destino.key_id_ent_fin)            
+       OR ( Origen.fl_cdf <> Destino.fl_cdf)            
+       --Modificado pOR MIA0            
+       OR ( ISNULL(Origen.f_fec_reg_bio,'') <> Destino.f_fec_reg_bio)            
+       --            
+       OR (Origen.fl_est_ibk <> Destino.fl_est_ibk)      -- Añadido pOR MGD0            
+       OR (Origen.c_ult_usu_ibk <> Destino.c_ult_usu_ibk)  -- Añadido pOR MGD0            
+       OR (Origen.f_fec_cre_ibk <> Destino.f_fec_cre_ibk)  -- Añadido pOR MGD0            
+       OR (Origen.fl_ibk <> Destino.fl_ibk)          -- Añadido pOR MGD0            
+       OR (Origen.key_id_act_eco<>Destino.key_id_act_eco)   --Añadido ZCS0            
+       OR (Origen.c_cod_obs<>Destino.c_cod_obs)--Añadido ZCS0            
+       OR (Origen.c_est_nit<>Destino.c_est_nit)--Añadido ZCS0            
+       OR (Origen.f_fec_cla_rie_man <>Destino.f_fec_cla_rie_man)--Añadido ZCS0            
+       OR (Origen.f_fec_ult_mod <>Destino.f_fec_ult_mod)--Añadido ZCS0            
+       OR (Origen.d_nom_cli_com <>Destino.d_nom_cli_com)--Añadido ZCS0            
+       OR (Origen.c_nro_reg_mer<>Destino. c_nro_reg_mer)--Añadido ZCS0            
+       OR (Origen.c_res <>Destino.c_res)--Añadido ZCS0            
+       OR (Origen.c_sec <>Destino.c_sec)--Añadido ZCS0            
+      OR (Origen.c_sit <>Destino.c_sit)--Añadido ZCS0            
+       OR (Origen.c_sta_elim <>Destino.c_sta_elim)--Añadido ZCS0            
+       OR (Origen.c_tip_cla_rie_bcp <>Destino.c_tip_cla_rie_bcp)--Añadido ZCS0            
+       OR (Origen.c_tip_cla_rie_man <>Destino.c_tip_cla_rie_man) --Añadido ZCS0            
+       OR (Origen.c_cod_cat_emp <>Destino.c_cod_cat_emp) --Añadido ZCS0            
+       OR (Origen.c_cod_tip_emp <>Destino.c_cod_tip_emp) --Añadido ZCS0            
+       OR (Origen.c_tip_soc <>Destino.c_tip_soc) --Añadido ZCS0            
+       OR (Origen.f_fec_des_neg<>Destino.f_fec_des_neg) --Añadido ZCS0            
+       OR (Origen.f_fec_ult_ing_neg<>Destino.f_fec_ult_ing_neg) --Añadido ZCS0            
+       OR (Origen.fl_neg<>Destino.fl_neg) --Añadido ZCS0           
+        OR (Origen.f_fec_ing<>Destino.f_fec_ing)  --Añadido ZCS0          
+       OR (Origen.f_fec_cla_rie_bcp<>Destino.f_fec_cla_rie_bcp) --Añadido ZCS0          
+       OR (Origen.key_id_tip_viv<>Destino.key_id_tip_viv ) --Añadido ZCS0          
+       OR (Origen.c_nro_dep<>Destino.c_nro_dep) --Añadido ZCS0          
+       OR (Origen.key_id_per_bcp <> Destino.key_id_per_bcp)            
+       OR (Origen.key_id_cal <> Destino.key_id_cal)            
+       OR (Origen.key_id_cal_max <> Destino.key_id_cal_max)  
+       OR (LTRIM(RTRIM(Origen.d_des_seg_cli_rie)) <> LTRIM(RTRIM(Destino.d_des_seg_cli_rie)))  
+       OR (Origen.key_id_act_eco_sec <> Destino.key_id_act_eco_sec)     
+       OR (Origen.key_id_act_eco_sec <> Destino.key_id_act_eco_sec)
+--------------------------------
+OR (Origen.c_prf_info                    <>Destino.c_prf_info         )         
+OR (Origen.d_des_prf_info                <>Destino.d_des_prf_info    )           
+OR (Origen.key_id_niv_edu                <>Destino.key_id_niv_edu    )           
+OR (Origen.key_id_est_civ                <>Destino.key_id_est_civ    )           
+OR (Origen.d_correo_electronico_info     <>Destino.d_correo_electronico_info)    
+OR (Origen.d_telefono_info               <>Destino.d_telefono_info          )    
+OR (Origen.d_celular_info                <>Destino.d_celular_info           )    
+OR (Origen.fl_residente_info             <>Destino.fl_residente_info        )    
+OR (Origen.c_conyugue_idc_info           <>Destino.c_conyugue_idc_info      )    
+OR (Origen.d_conyugue_nombre_info        <>Destino.d_conyugue_nombre_info   )    
+OR (Origen.d_conyugue_ape_pat_info       <>Destino.d_conyugue_ape_pat_info  )    
+OR (Origen.d_conyugue_ape_mat_info       <>Destino.d_conyugue_ape_mat_info  )    
+OR (Origen.key_id_pai                    <>Destino.key_id_pai              )     
+OR (Origen.fl_conyugue_residente_info    <>Destino.fl_conyugue_residente_info)   
+OR (Origen.d_refpersonal1_nombre_info    <>Destino.d_refpersonal1_nombre_info)   
+OR (Origen.d_refpersonal1_direccion_info <>Destino.d_refpersonal1_direccion_info)
+OR (Origen.d_refpersonal1_telefono_info  <>Destino.d_refpersonal1_telefono_info )
+OR (Origen.d_refpersonal2_nombre_info    <>Destino.d_refpersonal2_nombre_info   )
+OR (Origen.d_refpersonal2_direccion_info <>Destino.d_refpersonal2_direccion_info)
+OR (Origen.d_refpersonal2_telefono_info  <>Destino.d_refpersonal2_telefono_info )
+OR (Origen.d_refpersonal3_nombre_info    <>Destino.d_refpersonal3_nombre_info   )
+OR (Origen.d_refpersonal3_direccion_info <>Destino.d_refpersonal3_direccion_info)
+OR (Origen.d_refpersonal3_telefono_info  <>Destino.d_refpersonal3_telefono_info )
+OR (Origen.d_nombre_emp_info             <>Destino.d_nombre_emp_info)            
+OR (Origen.c_cargo_info                  <>Destino.c_cargo_info     )            
+OR (Origen.d_des_cargo_info              <>Destino.d_des_cargo_info )            
+OR (Origen.d_telefono_emp_info           <>Destino.d_telefono_emp_info)          
+OR (Origen.d_correo_electronico_emp_info <>Destino.d_correo_electronico_emp_info)
+OR (Origen.fl_fun_publico_info           <>Destino.fl_fun_publico_info    )      
+OR (Origen.key_id_sit_lab                <>Destino.key_id_sit_lab         )      
+OR (Origen.d_nit_info                    <>Destino.d_nit_info             )      
+OR (Origen.fl_negocio_propio_info        <>Destino.fl_negocio_propio_info )      
+OR (Origen.fl_pep_info                   <>Destino.fl_pep_info            )      
+OR (Origen.d_cargo_pep_info              <>Destino.d_cargo_pep_info       )      
+OR (Origen.d_periodo_pep_info            <>Destino.d_periodo_pep_info     )      
+OR (Origen.d_complemento_idc_info        <>Destino.d_complemento_idc_info )      
+OR (Origen.c_residencia_pais_info        <>Destino.c_residencia_pais_info )      
+OR (Origen.d_fax_info                    <>Destino.d_fax_info             )      
+OR (Origen.d_interno_emp_info            <>Destino.d_interno_emp_info     )      
+OR (Origen.d_fec_ingreso_trabajo_info    <>Destino.d_fec_ingreso_trabajo_info)   
+OR (Origen.c_actividad_info              <>Destino.c_actividad_info )            
+OR (Origen.d_actividad_info              <>Destino.d_actividad_info )            
+OR (Origen.c_ciiu_info                   <>Destino.c_ciiu_info      )            
+OR (Origen.d_ciiu_info                   <>Destino.d_ciiu_info      )            
+OR (Origen.i_salario_info                <>Destino.i_salario_info   )            
+OR (Origen.key_id_pai_res                <>Destino.key_id_pai_res   )       
+)       
+       
+       
+
+SET @fechaFinStatementABI = GETDATE();
+SET @fechaFinSectionABI = @fechaFinStatementABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinStatementABI);
+SET @elapsedSection = DATEDIFF(millisecond,@fechaInicioSectionABI,@fechaFinSectionABI);
+SET @elapsedStatement = DATEDIFF(millisecond,@fechaInicioStatementABI,@fechaFinStatementABI);
+
+PRINT N'Fin | UPDATE - #DIM_CLI_FINAL - BD_DWBCP.Dwh.Dim_cliente INTERMEDIOS CON CAMBIOS |' + CONVERT(NVARCHAR(23),@fechaFinSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|' + CONVERT(NVARCHAR(10),@elapsedSection) + N'|' + CONVERT(NVARCHAR(10),@elapsedStatement) + N'|';      
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UPDATE - #DIM_CLI_FINAL - BD_DWBCP.Dwh.Dim_cliente INTERMEDIOS CON CAMBIOS FIN',GETDATE())
+
+SET @fechaInicioSectionABI = GETDATE();
+SET @fechaInicioStatementABI = @fechaInicioSectionABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaInicioSectionABI);
+
+PRINT N'Inicio | CREAR - #TMP_KEY_ID_CLI |' + CONVERT(NVARCHAR(23),@fechaInicioSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|0|0|';
+
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','CREAR - #TMP_KEY_ID_CLI INI',GETDATE())
+
+IF OBJECT_ID ('tempdb..#TMP_KEY_ID_CLI') IS NOT NULL DROP TABLE #TMP_KEY_ID_CLI  
+SELECT 
+OO.c_cic
+,CASE WHEN @v_fecha_date < MIN(OO.EffectiveDate) THEN MIN(OO.EffectiveDate) ELSE MAX(OO.EffectiveDate) END [EffectiveDate]
+,CASE WHEN @v_fecha_date < MIN(OO.EffectiveDate) THEN MIN(OO.ExpirationDate) ELSE MAX(OO.ExpirationDate) END [ExpirationDate]
+,CONVERT(int,0) AS key_id_cli
+INTO #TMP_KEY_ID_CLI
+FROM #DIM_CLI_FINAL OD 
+INNER JOIN BD_DWBCP.Dwh.Dim_cliente OO
+	ON OD.c_cic = OO.c_cic
+GROUP BY OO.c_cic
+HAVING @v_fecha_date < MIN(OO.EffectiveDate) OR @v_fecha_date > MAX(OO.ExpirationDate)
+
+SET @fechaFinStatementABI = GETDATE();
+SET @fechaFinSectionABI = @fechaFinStatementABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinStatementABI);
+SET @elapsedSection = DATEDIFF(millisecond,@fechaInicioSectionABI,@fechaFinSectionABI);
+SET @elapsedStatement = DATEDIFF(millisecond,@fechaInicioStatementABI,@fechaFinStatementABI);
+
+PRINT N'Fin | CREAR - #TMP_KEY_ID_OPE |' + CONVERT(NVARCHAR(23),@fechaFinSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|' + CONVERT(NVARCHAR(10),@elapsedSection) + N'|' + CONVERT(NVARCHAR(10),@elapsedStatement) + N'|';  
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','CREAR - #TMP_KEY_ID_CLI FIN',GETDATE())
+     
+SET @fechaInicioSectionABI = GETDATE();
+SET @fechaInicioStatementABI = @fechaInicioSectionABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaInicioSectionABI);
+
+PRINT N'Inicio | UPDATE #TMP_KEY_ID_OPE |' + CONVERT(NVARCHAR(23),@fechaInicioSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|0|0|';
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UPDATE - #TMP_KEY_ID_CLI INI',GETDATE())
+
+UPDATE #TMP_KEY_ID_CLI
+SET key_id_cli=B.key_id_cli
+FROM BD_DWBCP.Dwh.Dim_cliente B WITH(INDEX(IDX_DIM_CLI_KEY_ID_CLI))
+WHERE B.c_cic  =#TMP_KEY_ID_CLI.c_cic
+	AND B.EffectiveDate=#TMP_KEY_ID_CLI.EffectiveDate
+	AND B.ExpirationDate=#TMP_KEY_ID_CLI.ExpirationDate
+	
+SET @fechaFinStatementABI = GETDATE();
+SET @fechaFinSectionABI = @fechaFinStatementABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinStatementABI);
+SET @elapsedSection = DATEDIFF(millisecond,@fechaInicioSectionABI,@fechaFinSectionABI);
+SET @elapsedStatement = DATEDIFF(millisecond,@fechaInicioStatementABI,@fechaFinStatementABI);
+
+PRINT N'Fin | UPDATE #TMP_KEY_ID_OPE |' + CONVERT(NVARCHAR(23),@fechaFinSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|' + CONVERT(NVARCHAR(10),@elapsedSection) + N'|' + CONVERT(NVARCHAR(10),@elapsedStatement) + N'|';  	
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UPDATE - #TMP_KEY_ID_CLI FIN',GETDATE())
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UPDATE - #BD_DWBCP.Dwh.Dim_cliente EXTREMOS INI',GETDATE())
+
+SET @fechaInicioSectionABI = GETDATE();
+SET @fechaInicioStatementABI = @fechaInicioSectionABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaInicioSectionABI);
+
+PRINT N'Inicio | UPDATE - #DIM_CLI_FINAL - BD_DWBCP.Dwh.Dim_cliente EXTREMOS |' + CONVERT(NVARCHAR(23),@fechaInicioSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|0|0|';
+
+
+
+WITH Origen AS
+(SELECT *
+FROM #TMP_KEY_ID_CLI
+)
+UPDATE Destino
+SET
+	Destino.UpdateExisting = 1
+	,Destino.OldEffectiveDate = Origen.EffectiveDate
+	,Destino.OldExpirationDate = Origen.ExpirationDate
+	,Destino.UpdateEffectiveDate = CASE WHEN @v_fecha_date < Origen.EffectiveDate 
+		THEN CASE WHEN OO.c_cic IS NOT NULL THEN @v_fecha_date ELSE DATEADD(day, 1, @v_fecha_date) END 
+		ELSE Origen.EffectiveDate END
+	,Destino.UpdateExpirationDate = CASE WHEN @v_fecha_date < Origen.EffectiveDate 
+		THEN Origen.ExpirationDate 
+		ELSE CASE WHEN OO.c_cic IS NOT NULL THEN @v_fecha_date ELSE Origen.ExpirationDate END END
+	,Destino.InsertNew = CASE WHEN OO.c_cic IS NOT NULL THEN 0 ELSE 1 END
+	,Destino.InsertEffectiveDate = CASE WHEN @v_fecha_date < Origen.EffectiveDate THEN @v_fecha_date ELSE DATEADD(day, 1, Origen.ExpirationDate) END
+	,Destino.InsertExpirationDate = @v_fecha_date
+	,Destino.key_id_cli_orig=Origen.key_id_cli --MOR020140217
+FROM #DIM_CLI_FINAL Destino 
+INNER JOIN Origen 
+	ON Destino.c_cic = Origen.c_cic	
+LEFT JOIN BD_DWBCP.Dwh.Dim_cliente OO
+	ON Origen.key_id_cli =OO.key_id_cli 
+	AND (( OO.c_ext_idc = Destino.c_ext_idc)            
+       AND ( OO.c_idc = Destino.c_idc)            
+       AND ( OO.d_ape_pat = Destino.d_ape_pat)            
+       AND ( OO.d_ape_mat = Destino.d_ape_mat)            
+       AND ( OO.d_des_ext_idc = Destino.d_des_ext_idc)            
+       AND ( OO.c_nac = Destino.c_nac)            
+       AND ( OO.c_fin_soc = Destino.c_fin_soc)            
+       AND ( OO.d_nom = Destino.d_nom)            
+       AND ( OO.d_nom_cli = Destino.d_nom_cli)            
+       AND ( OO.d_des_nac = Destino.d_des_nac)            
+       AND ( OO.d_des_fin_soc = Destino.d_des_fin_soc)            
+       AND ( OO.c_pri_pro_pas_ape = Destino.c_pri_pro_pas_ape)            
+       AND ( OO.c_pri_pro_act_ape = Destino.c_pri_pro_act_ape)            
+       --AND ( OO.f_fec_nac = Destino.f_fec_nac)            
+       AND ( OO.fl_pdh = Destino.fl_pdh)            
+       AND ( OO.c_tip_cli = Destino.c_tip_cli)            
+       AND ( OO.d_des_tip_cli = Destino.d_des_tip_cli)            
+       AND ( OO.c_est_civ = Destino.c_est_civ)            
+       AND ( OO.d_des_est_civ = Destino.d_des_est_civ)            
+       AND ( OO.c_ocu = Destino.c_ocu)            
+       AND ( OO.d_des_ocu = Destino.d_des_ocu)            
+       AND ( OO.c_prf = Destino.c_prf)            
+       AND ( OO.d_des_prf = Destino.d_des_prf)            
+--AND ( OO.c_sex = Destino.c_sex)  --Cambio MPR0 02/02/2011             
+       --AND ( OO.d_des_sex = Destino.d_des_sex) --Cambio MPR0 02/02/2011             
+       AND ( OO.c_cod_niv_edu = Destino.c_cod_niv_edu)            
+       AND ( OO.d_des_cod_niv_edu = Destino.d_des_cod_niv_edu)            
+       AND ( OO.c_cod_niv_soc_eco = Destino.c_cod_niv_soc_eco)            
+       AND ( OO.d_des_cod_niv_soc_eco = Destino.d_des_cod_niv_soc_eco)            
+       AND ( OO.c_mag = Destino.c_mag)            
+       AND ( OO.d_des_mag = Destino.d_des_mag)            
+       AND ( OO.c_sta = Destino.c_sta)            
+       AND ( OO.d_des_sta = Destino.d_des_sta)            
+       AND ( OO.c_seg = Destino.c_seg)            
+       AND ( OO.d_des_seg = Destino.d_des_seg)            
+       AND ( OO.c_ban = Destino.c_ban)            
+       AND ( OO.d_des_ban = Destino.d_des_ban)            
+       AND ( OO.c_sub_seg = Destino.c_sub_seg)            
+       AND ( OO.d_des_sub_seg = Destino.d_des_sub_seg)            
+       AND ( OO.c_tip_per = Destino.c_tip_per)            
+       AND ( OO.d_des_tip_per = Destino.d_des_tip_per)            
+       AND ( OO.c_tip_idc = Destino.c_tip_idc)            
+       AND ( OO.d_des_tip_idc = Destino.d_des_tip_idc)            
+       AND ( OO.d_des_nit = Destino.d_des_nit)            
+       --AND ( OO.c_cal = Destino.c_cal)            
+       --AND ( OO.c_max_cal = Destino.c_max_cal)            
+       --AND ( OO.d_des_cal = Destino.d_des_cal)            
+       AND ( OO.c_age = Destino.c_age)            
+       AND ( OO.c_seg_mkt = Destino.c_seg_mkt)            
+       AND ( OO.d_seg_mkt = Destino.d_seg_mkt)            
+       AND ( OO.key_id_ent_fin = Destino.key_id_ent_fin)            
+       AND ( OO.fl_cdf = Destino.fl_cdf)            
+       --Modificado por MIA0            
+       AND ( ISNULL(OO.f_fec_reg_bio,'') = Destino.f_fec_reg_bio)            
+       --            
+       AND (OO.fl_est_ibk = Destino.fl_est_ibk)      -- Añadido por MGD0            
+       AND (OO.c_ult_usu_ibk = Destino.c_ult_usu_ibk)  -- Añadido por MGD0            
+       AND (OO.f_fec_cre_ibk = Destino.f_fec_cre_ibk)  -- Añadido por MGD0            
+       AND (OO.fl_ibk = Destino.fl_ibk)          -- Añadido por MGD0            
+       AND (OO.key_id_act_eco=Destino.key_id_act_eco)   --Añadido ZCS0            
+       AND (OO.c_cod_obs=Destino.c_cod_obs)--Añadido ZCS0            
+       AND (OO.c_est_nit=Destino.c_est_nit)--Añadido ZCS0            
+       AND (OO.f_fec_cla_rie_man =Destino.f_fec_cla_rie_man)--Añadido ZCS0            
+       AND (OO.f_fec_ult_mod =Destino.f_fec_ult_mod)--Añadido ZCS0            
+       AND (OO.d_nom_cli_com =Destino.d_nom_cli_com)--Añadido ZCS0            
+       AND (OO.c_nro_reg_mer=Destino. c_nro_reg_mer)--Añadido ZCS0            
+       AND (OO.c_res =Destino.c_res)--Añadido ZCS0            
+  AND (OO.c_sec =Destino.c_sec)--Añadido ZCS0            
+       AND (OO.c_sit =Destino.c_sit)--Añadido ZCS0            
+       AND (OO.c_sta_elim =Destino.c_sta_elim)--Añadido ZCS0            
+       AND (OO.c_tip_cla_rie_bcp =Destino.c_tip_cla_rie_bcp)--Añadido ZCS0            
+       AND (OO.c_tip_cla_rie_man =Destino.c_tip_cla_rie_man) --Añadido ZCS0            
+       AND (OO.c_cod_cat_emp =Destino.c_cod_cat_emp) --Añadido ZCS0            
+       AND (OO.c_cod_tip_emp =Destino.c_cod_tip_emp) --Añadido ZCS0            
+       AND (OO.c_tip_soc =Destino.c_tip_soc) --Añadido ZCS0            
+       AND (OO.f_fec_des_neg=Destino.f_fec_des_neg) --Añadido ZCS0            
+       AND (OO.f_fec_ult_ing_neg=Destino.f_fec_ult_ing_neg) --Añadido ZCS0            
+       AND (OO.fl_neg=Destino.fl_neg) --Añadido ZCS0          
+           AND (OO.f_fec_ing=Destino.f_fec_ing)  --Añadido ZCS0          
+       AND (OO.f_fec_cla_rie_bcp=Destino.f_fec_cla_rie_bcp) --Añadido ZCS0          
+       AND (OO.key_id_tip_viv=Destino.key_id_tip_viv ) --Añadido ZCS0          
+       AND (OO.c_nro_dep=Destino.c_nro_dep) --Añadido ZCS0            
+       AND (OO.key_id_per_bcp = Destino.key_id_per_bcp)            
+       AND (OO.key_id_cal = Destino.key_id_cal)            
+       AND (OO.key_id_cal_max = Destino.key_id_cal_max)  
+       AND (LTRIM(RTRIM(OO.d_des_seg_cli_rie)) = LTRIM(RTRIM(Destino.d_des_seg_cli_rie)))  
+       AND (OO.key_id_act_eco_sec = Destino.key_id_act_eco_sec)
+	   AND (OO.c_est_neg =Destino.c_est_neg)
+-----------------------------------------------
+AND (OO.c_prf_info                    =Destino.c_prf_info         )         
+AND (OO.d_des_prf_info                =Destino.d_des_prf_info    )           
+AND (OO.key_id_niv_edu                =Destino.key_id_niv_edu    )           
+AND (OO.key_id_est_civ                =Destino.key_id_est_civ    )           
+AND (OO.d_correo_electronico_info     =Destino.d_correo_electronico_info)    
+AND (OO.d_telefono_info               =Destino.d_telefono_info          )    
+AND (OO.d_celular_info                =Destino.d_celular_info           )    
+AND (OO.fl_residente_info             =Destino.fl_residente_info        )    
+AND (OO.c_conyugue_idc_info           =Destino.c_conyugue_idc_info      )    
+AND (OO.d_conyugue_nombre_info        =Destino.d_conyugue_nombre_info   )    
+AND (OO.d_conyugue_ape_pat_info       =Destino.d_conyugue_ape_pat_info  )    
+AND (OO.d_conyugue_ape_mat_info       =Destino.d_conyugue_ape_mat_info  )    
+AND (OO.key_id_pai                    =Destino.key_id_pai              )     
+AND (OO.fl_conyugue_residente_info    =Destino.fl_conyugue_residente_info)   
+AND (OO.d_refpersonal1_nombre_info    =Destino.d_refpersonal1_nombre_info)   
+AND (OO.d_refpersonal1_direccion_info =Destino.d_refpersonal1_direccion_info)
+AND (OO.d_refpersonal1_telefono_info  =Destino.d_refpersonal1_telefono_info )
+AND (OO.d_refpersonal2_nombre_info    =Destino.d_refpersonal2_nombre_info   )
+AND (OO.d_refpersonal2_direccion_info =Destino.d_refpersonal2_direccion_info)
+AND (OO.d_refpersonal2_telefono_info  =Destino.d_refpersonal2_telefono_info )
+AND (OO.d_refpersonal3_nombre_info    =Destino.d_refpersonal3_nombre_info   )
+AND (OO.d_refpersonal3_direccion_info =Destino.d_refpersonal3_direccion_info)
+AND (OO.d_refpersonal3_telefono_info  =Destino.d_refpersonal3_telefono_info )
+AND (OO.d_nombre_emp_info             =Destino.d_nombre_emp_info)            
+AND (OO.c_cargo_info                  =Destino.c_cargo_info     )            
+AND (OO.d_des_cargo_info              =Destino.d_des_cargo_info )            
+AND (OO.d_telefono_emp_info           =Destino.d_telefono_emp_info)          
+AND (OO.d_correo_electronico_emp_info =Destino.d_correo_electronico_emp_info)
+AND (OO.fl_fun_publico_info           =Destino.fl_fun_publico_info    )      
+AND (OO.key_id_sit_lab                =Destino.key_id_sit_lab         )      
+AND (OO.d_nit_info                    =Destino.d_nit_info             )      
+AND (OO.fl_negocio_propio_info        =Destino.fl_negocio_propio_info )      
+AND (OO.fl_pep_info                   =Destino.fl_pep_info            )      
+AND (OO.d_cargo_pep_info              =Destino.d_cargo_pep_info       )      
+AND (OO.d_periodo_pep_info            =Destino.d_periodo_pep_info     )      
+AND (OO.d_complemento_idc_info        =Destino.d_complemento_idc_info )      
+AND (OO.c_residencia_pais_info        =Destino.c_residencia_pais_info )      
+AND (OO.d_fax_info                    =Destino.d_fax_info             )      
+AND (OO.d_interno_emp_info            =Destino.d_interno_emp_info     )      
+AND (OO.d_fec_ingreso_trabajo_info    =Destino.d_fec_ingreso_trabajo_info)   
+AND (OO.c_actividad_info              =Destino.c_actividad_info )            
+AND (OO.d_actividad_info              =Destino.d_actividad_info )            
+AND (OO.c_ciiu_info                   =Destino.c_ciiu_info      )            
+AND (OO.d_ciiu_info                   =Destino.d_ciiu_info      )            
+AND (OO.i_salario_info                =Destino.i_salario_info   )            
+AND (OO.key_id_pai_res                =Destino.key_id_pai_res   )            
+	   )
+SET @fechaFinStatementABI = GETDATE();
+SET @fechaFinSectionABI = @fechaFinStatementABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinStatementABI);
+SET @elapsedSection = DATEDIFF(millisecond,@fechaInicioSectionABI,@fechaFinSectionABI);
+SET @elapsedStatement = DATEDIFF(millisecond,@fechaInicioStatementABI,@fechaFinStatementABI);
+
+PRINT N'Fin | UPDATE - #DIM_CLI_FINAL - BD_DWBCP.Dwh.Dim_cliente EXTREMOS |' + CONVERT(NVARCHAR(23),@fechaFinSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|' + CONVERT(NVARCHAR(10),@elapsedSection) + N'|' + CONVERT(NVARCHAR(10),@elapsedStatement) + N'|';
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UPDATE - #BD_DWBCP.Dwh.Dim_cliente EXTREMOS FIN',GETDATE())
+
+
+SET @fechaInicioSectionABI = GETDATE();
+SET @fechaInicioStatementABI = @fechaInicioSectionABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaInicioSectionABI);
+
+PRINT N'Inicio | UPDATE - #DIM_CLI_FINAL - BD_DWBCP.Dwh.Dim_cliente NUEVOS |' + CONVERT(NVARCHAR(23),@fechaInicioSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|0|0|';
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UPDATE - #BD_DWBCP.Dwh.Dim_cliente NUEVOS INI',GETDATE())
+
+UPDATE Destino
+SET
+	Destino.InsertNew = 1
+	,Destino.InsertEffectiveDate = @v_fecha_date
+	,Destino.InsertExpirationDate = @v_fecha_date
+FROM #DIM_CLI_FINAL Destino 
+LEFT JOIN BD_DWBCP.Dwh.Dim_cliente Origen
+	ON Destino.c_cic = Origen.c_cic
+WHERE Origen.c_cic  IS NULL;
+
+SET @fechaFinStatementABI = GETDATE();
+SET @fechaFinSectionABI = @fechaFinStatementABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinStatementABI);
+SET @elapsedSection = DATEDIFF(millisecond,@fechaInicioSectionABI,@fechaFinSectionABI);
+SET @elapsedStatement = DATEDIFF(millisecond,@fechaInicioStatementABI,@fechaFinStatementABI);
+
+PRINT N'Fin | UPDATE - #DIM_CLI_FINAL - BD_DWBCP.Dwh.Dim_cliente NUEVOS |' + CONVERT(NVARCHAR(23),@fechaFinSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|' + CONVERT(NVARCHAR(10),@elapsedSection) + N'|' + CONVERT(NVARCHAR(10),@elapsedStatement) + N'|';      
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UPDATE - #BD_DWBCP.Dwh.Dim_cliente NUEVOS FIN',GETDATE())
+
+--/* **********UPDATE e INSERT en la tabla BD_DWBCP.Dwh.Dim_cliente a partir de la tabla #DIM_CLI_FINAL *********** */
+
+SET @fechaInicioSectionABI = GETDATE();
+SET @fechaInicioStatementABI = @fechaInicioSectionABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaInicioSectionABI);
+
+PRINT N'Inicio | NONCLUSTERED INDEX - #DIM_CLI_FINAL - UpdateExisting |' + CONVERT(NVARCHAR(23),@fechaInicioSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|0|0|';
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UPDATE - UpdateExisting INI',GETDATE())
+
+CREATE NONCLUSTERED INDEX IX_DIM_CLI_FINAL_UPDATE ON #DIM_CLI_FINAL (key_id_cli_orig) INCLUDE (UpdateEffectiveDate,UpdateExpirationDate) WHERE (UpdateExisting = 1);--MOR0
+
+
+SET @fechaFinStatementABI = GETDATE();
+SET @fechaFinSectionABI = @fechaFinStatementABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinStatementABI);
+SET @elapsedSection = DATEDIFF(millisecond,@fechaInicioSectionABI,@fechaFinSectionABI);
+SET @elapsedStatement = DATEDIFF(millisecond,@fechaInicioStatementABI,@fechaFinStatementABI);
+
+PRINT N'Fin | NONCLUSTERED INDEX - #DIM_CLI_FINAL - UpdateExisting |' + CONVERT(NVARCHAR(23),@fechaFinStatementABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|' + CONVERT(NVARCHAR(10),@elapsedSection) + N'|' + CONVERT(NVARCHAR(10),@elapsedStatement) + N'|';
+
+      
+SET @fechaInicioSectionABI = GETDATE();
+SET @fechaInicioStatementABI = @fechaInicioSectionABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaInicioSectionABI);
+
+PRINT N'Inicio | NONCLUSTERED INDEX - #DIM_CLI_FINAL - InsertNew |' + CONVERT(NVARCHAR(23),@fechaInicioSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|0|0|';
+
+CREATE NONCLUSTERED INDEX IX_DIM_CLI_FINAL_INSERT ON #DIM_CLI_FINAL (c_cic) WHERE (InsertNew = 1);
+
+SET @fechaFinStatementABI = GETDATE();
+SET @fechaFinSectionABI = @fechaFinStatementABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinStatementABI);
+SET @elapsedSection = DATEDIFF(millisecond,@fechaInicioSectionABI,@fechaFinSectionABI);
+SET @elapsedStatement = DATEDIFF(millisecond,@fechaInicioStatementABI,@fechaFinStatementABI);
+
+PRINT N'Fin | NONCLUSTERED INDEX - #DIM_CLI_FINAL - InsertNew |' + CONVERT(NVARCHAR(23),@fechaFinStatementABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|' + CONVERT(NVARCHAR(10),@elapsedSection) + N'|' + CONVERT(NVARCHAR(10),@elapsedStatement) + N'|';
+
+
+SET @fechaInicioSectionABI = GETDATE();
+SET @fechaInicioStatementABI = @fechaInicioSectionABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaInicioSectionABI);
+
+PRINT N'Inicio | NONCLUSTERED INDEX - #DIM_CLI_FINAL - OverwriteExisting |' + CONVERT(NVARCHAR(23),@fechaInicioSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|0|0|';
+
+CREATE NONCLUSTERED INDEX IX_DIM_OPE_FINAL_OVERWRITE ON #DIM_CLI_FINAL (c_cic,OldEffectiveDate,OldExpirationDate) WHERE (OverwriteExisting = 1);
+
+
+
+SET @fechaFinStatementABI = GETDATE();
+SET @fechaFinSectionABI = @fechaFinStatementABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinStatementABI);
+SET @elapsedSection = DATEDIFF(millisecond,@fechaInicioSectionABI,@fechaFinSectionABI);
+SET @elapsedStatement = DATEDIFF(millisecond,@fechaInicioStatementABI,@fechaFinStatementABI);
+
+PRINT N'Fin | NONCLUSTERED INDEX - #DIM_CLI_FINAL - OverwriteExisting |' + CONVERT(NVARCHAR(23),@fechaFinStatementABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|' + CONVERT(NVARCHAR(10),@elapsedSection) + N'|' + CONVERT(NVARCHAR(10),@elapsedStatement) + N'|';
+
+
+SET @fechaInicioSectionABI = GETDATE();
+SET @fechaInicioStatementABI = @fechaInicioSectionABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaInicioSectionABI);
+
+
+
+PRINT N'Inicio | UPDATE - BD_DWBCP.Dwh.Dim_cliente - #DIM_CLI_FINAL UpdateExisting |' + CONVERT(NVARCHAR(23),@fechaInicioSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|0|0|';
+
+--Hace JOIN por c_ope, c_apli, c_dig_ver, OldEffectiveDate, y OldExpirationDate, para los registros que hay que actualizar.
+--Actualiza con los nuevos valores de UpdateEffectiveDate y UpdateExpirationDate.
+--aqui 1 min 7 seg
+UPDATE Destino
+SET
+	Destino.EffectiveDate = Origen.UpdateEffectiveDate
+	,Destino.ExpirationDate = Origen.UpdateExpirationDate
+FROM BD_DWBCP.Dwh.Dim_cliente Destino --with(index(IDX_DIM_OPE_KEY_ID_OPE))
+INNER JOIN #DIM_CLI_FINAL Origen
+ON Destino.key_id_cli=Origen.key_id_cli_orig
+WHERE Origen.UpdateExisting = 1;       
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UPDATE - UpdateExisting FIN',GETDATE())
+
+SET @fechaFinStatementABI = GETDATE();
+SET @fechaFinSectionABI = @fechaFinStatementABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinStatementABI);
+SET @elapsedSection = DATEDIFF(millisecond,@fechaInicioSectionABI,@fechaFinSectionABI);
+SET @elapsedStatement = DATEDIFF(millisecond,@fechaInicioStatementABI,@fechaFinStatementABI);
+
+PRINT N'Fin | UPDATE - BD_DWBCP.Dwh.Dim_cliente - #DIM_CLI_FINAL UpdateExisting |' + CONVERT(NVARCHAR(23),@fechaFinSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|' + CONVERT(NVARCHAR(10),@elapsedSection) + N'|' + CONVERT(NVARCHAR(10),@elapsedStatement) + N'|';      
+
+
+SET @fechaInicioSectionABI = GETDATE();
+SET @fechaInicioStatementABI = @fechaInicioSectionABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaInicioSectionABI);
+
+PRINT N'Inicio | UPDATE - BD_DWBCP.Dwh.Dim_cliente - #DIM_CLI_FINAL OverwriteExisting |' + CONVERT(NVARCHAR(23),@fechaInicioSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|0|0|';
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UPDATE - OverwriteExisting INI',GETDATE())
+
+UPDATE Destino
+SET    Destino.key_id_per_bcp = Origen.key_id_per_bcp            
+      ,Destino.key_id_cal = Origen.key_id_cal            
+      ,Destino.key_id_cal_max = Origen.key_id_cal_max            
+      ,Destino.c_cic = Origen.c_cic            
+      ,Destino.c_nac = Origen.c_nac            
+      ,Destino.c_fin_soc = Origen.c_fin_soc            
+      ,Destino.c_idc = Origen.c_idc            
+      ,Destino.d_ape_pat = Origen.d_ape_pat            
+      ,Destino.d_ape_mat = Origen.d_ape_mat            
+      ,Destino.d_nom = Origen.d_nom            
+      ,Destino.d_nom_cli = Origen.d_nom_cli            
+      ,Destino.d_des_nac = Origen.d_des_nac            
+      ,Destino.d_des_fin_soc = Origen.d_des_fin_soc            
+      ,Destino.c_pri_pro_pas_ape = Origen.c_pri_pro_pas_ape            
+      ,Destino.c_pri_pro_act_ape = Origen.c_pri_pro_act_ape            
+      ,Destino.f_fec_nac = Origen.f_fec_nac            
+      ,Destino.fl_pdh = Origen.fl_pdh            
+      ,Destino.c_tip_cli = Origen.c_tip_cli            
+      ,Destino.d_des_tip_cli = Origen.d_des_tip_cli            
+      ,Destino.c_est_civ = Origen.c_est_civ            
+      ,Destino.d_des_est_civ = Origen.d_des_est_civ            
+      ,Destino.c_ocu = Origen.c_ocu            
+      ,Destino.d_des_ocu = Origen.d_des_ocu            
+      ,Destino.c_prf = Origen.c_prf            
+      ,Destino.d_des_prf = Origen.d_des_prf            
+      ,Destino.c_sex = Origen.c_sex            
+      ,Destino.d_des_sex = Origen.d_des_sex            
+      ,Destino.c_cod_niv_edu = Origen.c_cod_niv_edu            
+      ,Destino.d_des_cod_niv_edu = Origen.d_des_cod_niv_edu            
+      ,Destino.c_cod_niv_soc_eco = Origen.c_cod_niv_soc_eco            
+      ,Destino.d_des_cod_niv_soc_eco = Origen.d_des_cod_niv_soc_eco            
+      ,Destino.c_mag = Origen.c_mag            
+      ,Destino.d_des_mag = Origen.d_des_mag            
+      ,Destino.c_sta = Origen.c_sta            
+      ,Destino.d_des_sta = Origen.d_des_sta            
+      ,Destino.c_seg = Origen.c_seg            
+      ,Destino.d_des_seg = Origen.d_des_seg            
+      ,Destino.c_ban = Origen.c_ban            
+      ,Destino.d_des_ban = Origen.d_des_ban            
+      ,Destino.c_sub_seg = Origen.c_sub_seg            
+      ,Destino.d_des_sub_seg = Origen.d_des_sub_seg            
+      ,Destino.c_tip_per = Origen.c_tip_per            
+      ,Destino.d_des_tip_per = Origen.d_des_tip_per            
+      ,Destino.c_tip_idc = Origen.c_tip_idc            
+      ,Destino.d_des_tip_idc = Origen.d_des_tip_idc            
+      ,Destino.d_des_nit = Origen.d_des_nit            
+      ,Destino.c_ext_idc = Origen.c_ext_idc            
+      ,Destino.d_des_ext_idc = Origen.d_des_ext_idc            
+      --,Destino.c_cal = Origen.c_cal            
+      --,Destino.c_max_cal = Origen.c_max_cal            
+      --,Destino.d_des_cal = Origen.d_des_cal            
+      ,Destino.c_age = Origen.c_age            
+      ,Destino.c_seg_mkt = Origen.c_seg_mkt            
+      ,Destino.d_seg_mkt = Origen.d_seg_mkt            
+      ,Destino.key_id_ent_fin = Origen.key_id_ent_fin            
+      ,Destino.fl_cdf = Origen.fl_cdf            
+      ,Destino.f_fec_reg_bio = Origen.f_fec_reg_bio            
+      ,Destino.fl_est_ibk = Origen.fl_est_ibk            
+      ,Destino.c_ult_usu_ibk = Origen.c_ult_usu_ibk            
+      ,Destino.f_fec_cre_ibk = Origen.f_fec_cre_ibk            
+      ,Destino.fl_ibk = Origen.fl_ibk            
+      ,Destino.key_id_act_eco=Origen.key_id_act_eco   --Añadido ZCS0            
+	 ,Destino.c_cod_obs=Origen.c_cod_obs--Añadido ZCS0            
+	 ,Destino.c_est_nit=Origen.c_est_nit--Añadido ZCS0            
+	 ,Destino.f_fec_cla_rie_man =Origen.f_fec_cla_rie_man--Añadido ZCS0            
+	 ,Destino.f_fec_ult_mod =Origen.f_fec_ult_mod--Añadido ZCS0            
+	 ,Destino.d_nom_cli_com =Origen.d_nom_cli_com--Añadido ZCS0            
+	 ,Destino.c_nro_reg_mer=Origen. c_nro_reg_mer--Añadido ZCS0            
+	 ,Destino.c_res =Origen.c_res--Añadido ZCS0            
+	 ,Destino.c_sec =Origen.c_sec--Añadido ZCS0            
+	 ,Destino.c_sit =Origen.c_sit--Añadido ZCS0            
+	 ,Destino.c_sta_elim =Origen.c_sta_elim--Añadido ZCS0            
+	 ,Destino.c_tip_cla_rie_bcp =Origen.c_tip_cla_rie_bcp--Añadido ZCS0            
+	 ,Destino.c_tip_cla_rie_man =Origen.c_tip_cla_rie_man --Añadido ZCS0            
+	 ,Destino.c_cod_cat_emp =Origen.c_cod_cat_emp --Añadido ZCS0           
+	 ,Destino.c_cod_tip_emp =Origen.c_cod_tip_emp --Añadido ZCS0            
+	 ,Destino.c_tip_soc =Origen.c_tip_soc --Añadido ZCS0            
+	 ,Destino.f_fec_des_neg=Origen.f_fec_des_neg      -- Añadido por ZCS0            
+	 ,Destino.f_fec_ult_ing_neg=Origen.f_fec_ult_ing_neg -- Añadido por ZCS0            
+	 ,Destino.fl_neg= Origen.fl_neg                 -- Añadido por ZCS0            
+	 ,Destino.f_fec_ing=Origen.f_fec_ing  --Añadido ZCS0          
+	 ,Destino.f_fec_cla_rie_bcp=Origen.f_fec_cla_rie_bcp --Añadido ZCS0          
+	 ,Destino.key_id_tip_viv=Origen.key_id_tip_viv  --Añadido ZCS0          
+	  ,Destino.c_nro_dep=Origen.c_nro_dep --Añadido ZCS0   
+	  ,Destino.d_des_seg_cli_rie= LTRIM(RTRIM(Origen.d_des_seg_cli_rie))      
+	  ,Destino.key_id_act_eco_sec = Origen.key_id_act_eco_sec 
+	  ,Destino.c_est_neg =Origen.c_est_neg
+--------------------------
+  ,Destino.c_prf_info                    =Origen.c_prf_info                  
+  ,Destino.d_des_prf_info                =Origen.d_des_prf_info               
+  ,Destino.key_id_niv_edu                =Origen.key_id_niv_edu               
+  ,Destino.key_id_est_civ                =Origen.key_id_est_civ               
+  ,Destino.d_correo_electronico_info     =Origen.d_correo_electronico_info    
+  ,Destino.d_telefono_info               =Origen.d_telefono_info              
+  ,Destino.d_celular_info                =Origen.d_celular_info               
+  ,Destino.fl_residente_info             =Origen.fl_residente_info            
+  ,Destino.c_conyugue_idc_info           =Origen.c_conyugue_idc_info          
+  ,Destino.d_conyugue_nombre_info        =Origen.d_conyugue_nombre_info       
+  ,Destino.d_conyugue_ape_pat_info       =Origen.d_conyugue_ape_pat_info      
+  ,Destino.d_conyugue_ape_mat_info       =Origen.d_conyugue_ape_mat_info      
+  ,Destino.key_id_pai                    =Origen.key_id_pai                   
+  ,Destino.fl_conyugue_residente_info    =Origen.fl_conyugue_residente_info   
+  ,Destino.d_refpersonal1_nombre_info    =Origen.d_refpersonal1_nombre_info   
+  ,Destino.d_refpersonal1_direccion_info =Origen.d_refpersonal1_direccion_info
+  ,Destino.d_refpersonal1_telefono_info  =Origen.d_refpersonal1_telefono_info 
+  ,Destino.d_refpersonal2_nombre_info    =Origen.d_refpersonal2_nombre_info   
+  ,Destino.d_refpersonal2_direccion_info =Origen.d_refpersonal2_direccion_info
+  ,Destino.d_refpersonal2_telefono_info  =Origen.d_refpersonal2_telefono_info 
+  ,Destino.d_refpersonal3_nombre_info    =Origen.d_refpersonal3_nombre_info   
+  ,Destino.d_refpersonal3_direccion_info =Origen.d_refpersonal3_direccion_info
+  ,Destino.d_refpersonal3_telefono_info  =Origen.d_refpersonal3_telefono_info 
+  ,Destino.d_nombre_emp_info             =Origen.d_nombre_emp_info            
+  ,Destino.c_cargo_info                  =Origen.c_cargo_info                 
+  ,Destino.d_des_cargo_info              =Origen.d_des_cargo_info             
+  ,Destino.d_telefono_emp_info           =Origen.d_telefono_emp_info          
+  ,Destino.d_correo_electronico_emp_info =Origen.d_correo_electronico_emp_info
+  ,Destino.fl_fun_publico_info           =Origen.fl_fun_publico_info          
+  ,Destino.key_id_sit_lab                =Origen.key_id_sit_lab               
+  ,Destino.d_nit_info                    =Origen.d_nit_info                   
+  ,Destino.fl_negocio_propio_info        =Origen.fl_negocio_propio_info       
+  ,Destino.fl_pep_info                   =Origen.fl_pep_info                  
+  ,Destino.d_cargo_pep_info              =Origen.d_cargo_pep_info             
+  ,Destino.d_periodo_pep_info            =Origen.d_periodo_pep_info           
+  ,Destino.d_complemento_idc_info        =Origen.d_complemento_idc_info       
+  ,Destino.c_residencia_pais_info        =Origen.c_residencia_pais_info       
+  ,Destino.d_fax_info                    =Origen.d_fax_info                   
+  ,Destino.d_interno_emp_info            =Origen.d_interno_emp_info           
+  ,Destino.d_fec_ingreso_trabajo_info    =Origen.d_fec_ingreso_trabajo_info   
+  ,Destino.c_actividad_info              =Origen.c_actividad_info             
+  ,Destino.d_actividad_info              =Origen.d_actividad_info             
+  ,Destino.c_ciiu_info                   =Origen.c_ciiu_info                  
+  ,Destino.d_ciiu_info                   =Origen.d_ciiu_info                  
+  ,Destino.i_salario_info                =Origen.i_salario_info               
+  ,Destino.key_id_pai_res                =Origen.key_id_pai_res
+FROM BD_DWBCP.Dwh.Dim_cliente Destino 
+INNER JOIN #DIM_CLI_FINAL Origen
+	ON Destino.key_id_cli=Origen.key_id_cli_orig 
+WHERE Origen.OverwriteExisting = 1;     
+
+SET @fechaFinStatementABI = GETDATE();
+SET @fechaFinSectionABI = @fechaFinStatementABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinStatementABI);
+SET @elapsedSection = DATEDIFF(millisecond,@fechaInicioSectionABI,@fechaFinSectionABI);
+SET @elapsedStatement = DATEDIFF(millisecond,@fechaInicioStatementABI,@fechaFinStatementABI);
+
+PRINT N'Fin | UPDATE - BD_DWBCP.Dwh.Dim_cliente - #DIM_CLI_FINAL OverwriteExisting |' + CONVERT(NVARCHAR(23),@fechaFinSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|' + CONVERT(NVARCHAR(10),@elapsedSection) + N'|' + CONVERT(NVARCHAR(10),@elapsedStatement) + N'|';      
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','UPDATE - OverwriteExisting FIN',GETDATE())
+
+SET @fechaInicioSectionABI = GETDATE();
+SET @fechaInicioStatementABI = @fechaInicioSectionABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaInicioSectionABI);
+
+PRINT N'Inicio | INSERT - BD_DWBCP.Dwh.Dim_cliente - #DIM_CLI_FINAL |' + CONVERT(NVARCHAR(23),@fechaInicioSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|0|0|';
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','INSERT - BD_DWBCP.Dwh.Dim_cliente - #DIM_CLI_FINAL INI',GETDATE())
+
+ --Inserta los nuevos registros.
+INSERT INTO BD_DWBCP.Dwh.Dim_cliente      
+(
+key_id_per_bcp,key_id_cal,key_id_cal_max,c_cic,c_nac,c_fin_soc,c_idc,d_ape_pat,d_ape_mat,d_nom,d_nom_cli,d_des_nac,
+d_des_fin_soc,c_pri_pro_pas_ape,c_pri_pro_act_ape,f_fec_nac,fl_pdh,c_tip_cli,d_des_tip_cli,c_est_civ,d_des_est_civ,c_ocu,
+d_des_ocu,c_prf,d_des_prf,c_sex,d_des_sex,c_cod_niv_edu,d_des_cod_niv_edu,c_cod_niv_soc_eco,d_des_cod_niv_soc_eco,c_mag,
+d_des_mag,c_sta,d_des_sta,c_seg,d_des_seg,c_ban,d_des_ban,c_sub_seg,d_des_sub_seg,c_tip_per,d_des_tip_per,c_tip_idc,d_des_tip_idc,
+d_des_nit,c_ext_idc,d_des_ext_idc,c_age,c_seg_mkt,d_seg_mkt,key_id_ent_fin,fl_cdf,f_fec_reg_bio,fl_est_ibk,c_ult_usu_ibk,f_fec_cre_ibk,
+fl_ibk,key_id_act_eco,c_cod_obs,c_est_nit,f_fec_cla_rie_man,f_fec_ult_mod,d_nom_cli_com,c_nro_reg_mer,c_res,c_sec,c_sit,c_sta_elim,
+c_tip_cla_rie_bcp,c_tip_cla_rie_man,c_cod_cat_emp,c_cod_tip_emp,c_tip_soc,f_fec_des_neg,f_fec_ult_ing_neg,fl_neg,EffectiveDate,
+ExpirationDate,f_fec_ing,f_fec_cla_rie_bcp,key_id_tip_viv,c_nro_dep,d_des_seg_cli_rie,key_id_act_eco_sec,c_est_neg,
+c_prf_info,d_des_prf_info,key_id_niv_edu,key_id_est_civ,d_correo_electronico_info,d_telefono_info,d_celular_info,fl_residente_info,
+c_conyugue_idc_info,d_conyugue_nombre_info,d_conyugue_ape_pat_info,d_conyugue_ape_mat_info,key_id_pai,fl_conyugue_residente_info,
+d_refpersonal1_nombre_info,d_refpersonal1_direccion_info,d_refpersonal1_telefono_info,d_refpersonal2_nombre_info,d_refpersonal2_direccion_info,
+d_refpersonal2_telefono_info,d_refpersonal3_nombre_info,d_refpersonal3_direccion_info,d_refpersonal3_telefono_info,d_nombre_emp_info,c_cargo_info,
+d_des_cargo_info,d_telefono_emp_info,d_correo_electronico_emp_info,fl_fun_publico_info,key_id_sit_lab,d_nit_info,fl_negocio_propio_info,
+fl_pep_info,d_cargo_pep_info,d_periodo_pep_info,d_complemento_idc_info,c_residencia_pais_info,d_fax_info,d_interno_emp_info,d_fec_ingreso_trabajo_info,
+c_actividad_info,d_actividad_info,c_ciiu_info,d_ciiu_info,i_salario_info,key_id_pai_res
+)
+SELECT  key_id_per_bcp,  key_id_cal, key_id_cal_max, c_cic,c_nac,c_fin_soc,            
+ c_idc,d_ape_pat,d_ape_mat,d_nom,d_nom_cli,            
+ d_des_nac,d_des_fin_soc,c_pri_pro_pas_ape,            
+ c_pri_pro_act_ape,f_fec_nac,fl_pdh,c_tip_cli,            
+ d_des_tip_cli,c_est_civ,d_des_est_civ,c_ocu,            
+ d_des_ocu,c_prf,d_des_prf,c_sex,d_des_sex,            
+ c_cod_niv_edu,d_des_cod_niv_edu,c_cod_niv_soc_eco,            
+ d_des_cod_niv_soc_eco,c_mag,d_des_mag,c_sta,            
+ d_des_sta,c_seg,d_des_seg,c_ban,d_des_ban,            
+ c_sub_seg,d_des_sub_seg,c_tip_per,d_des_tip_per,            
+ c_tip_idc,d_des_tip_idc,d_des_nit,c_ext_idc,            
+ d_des_ext_idc,    
+ --c_cal,c_max_cal,d_des_cal,            
+ c_age,c_seg_mkt,d_seg_mkt,key_id_ent_fin,fl_cdf,             
+ --Modificado por MIA0            
+ f_fec_reg_bio,fl_est_ibk,c_ult_usu_ibk,f_fec_cre_ibk,            
+ fl_ibk, key_id_act_eco ,c_cod_obs ,c_est_nit ,f_fec_cla_rie_man ,f_fec_ult_mod ,d_nom_cli_com ,c_nro_reg_mer ,c_res,c_sec ,c_sit ,c_sta_elim  ,c_tip_cla_rie_bcp ,c_tip_cla_rie_man ,c_cod_cat_emp,c_cod_tip_emp,c_tip_soc,  --Añadido ZCS0            
+  f_fec_des_neg  ,f_fec_ult_ing_neg ,fl_neg,         -- Añadido por ZCS0            
+  InsertEffectiveDate, InsertExpirationDate, f_fec_ing,f_fec_cla_rie_bcp,key_id_tip_viv,  c_nro_dep ,d_des_seg_cli_rie, key_id_act_eco_sec
+  ,c_est_neg
+--nuevos--
+  ,c_prf_info,d_des_prf_info,key_id_niv_edu,key_id_est_civ,d_correo_electronico_info,d_telefono_info,d_celular_info,fl_residente_info,
+c_conyugue_idc_info,d_conyugue_nombre_info,d_conyugue_ape_pat_info,d_conyugue_ape_mat_info,key_id_pai,fl_conyugue_residente_info,
+d_refpersonal1_nombre_info,d_refpersonal1_direccion_info,d_refpersonal1_telefono_info,d_refpersonal2_nombre_info,d_refpersonal2_direccion_info,
+d_refpersonal2_telefono_info,d_refpersonal3_nombre_info,d_refpersonal3_direccion_info,d_refpersonal3_telefono_info,d_nombre_emp_info,c_cargo_info,
+d_des_cargo_info,d_telefono_emp_info,d_correo_electronico_emp_info,fl_fun_publico_info,key_id_sit_lab,d_nit_info,fl_negocio_propio_info,
+fl_pep_info,d_cargo_pep_info,d_periodo_pep_info,d_complemento_idc_info,c_residencia_pais_info,d_fax_info,d_interno_emp_info,d_fec_ingreso_trabajo_info,
+c_actividad_info,d_actividad_info,c_ciiu_info,d_ciiu_info,i_salario_info,key_id_pai_res
+FROM #DIM_CLI_FINAL      
+WHERE InsertNew = 1;
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','INSERT - BD_DWBCP.Dwh.Dim_cliente - #DIM_CLI_FINAL FIN',GETDATE())
+
+SET @fechaFinStatementABI = GETDATE();
+SET @fechaFinSectionABI = @fechaFinStatementABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinStatementABI);
+SET @elapsedSection = DATEDIFF(millisecond,@fechaInicioSectionABI,@fechaFinSectionABI);
+SET @elapsedStatement = DATEDIFF(millisecond,@fechaInicioStatementABI,@fechaFinStatementABI);
+
+PRINT N'Fin | INSERT - BD_DWBCP.Dwh.Dim_cliente - #DIM_CLI_FINAL |' + CONVERT(NVARCHAR(23),@fechaFinSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|' + CONVERT(NVARCHAR(10),@elapsedSection) + N'|' + CONVERT(NVARCHAR(10),@elapsedStatement) + N'|';      
+      
+        
+
+TRUNCATE TABLE BD_DWBCP.Stg.Dim_cliente
+
+INSERT INTO BD_DWBCP.Stg.Dim_cliente
+(
+key_id_per_bcp,key_id_cal,key_id_cal_max,c_cic,c_nac,c_fin_soc,c_idc,d_ape_pat,d_ape_mat,d_nom,d_nom_cli,d_des_nac,d_des_fin_soc,c_pri_pro_pas_ape,
+c_pri_pro_act_ape,f_fec_nac,fl_pdh,c_tip_cli,d_des_tip_cli,c_est_civ,d_des_est_civ,c_ocu,d_des_ocu,c_prf,d_des_prf,c_sex,d_des_sex,c_cod_niv_edu,
+d_des_cod_niv_edu,c_cod_niv_soc_eco,d_des_cod_niv_soc_eco,c_mag,d_des_mag,c_sta,d_des_sta,c_seg,d_des_seg,c_ban,d_des_ban,c_sub_seg,d_des_sub_seg,
+c_tip_per,d_des_tip_per,c_tip_idc,d_des_tip_idc,d_des_nit,c_ext_idc,d_des_ext_idc,c_mat_ffn,c_age,c_seg_mkt,d_seg_mkt,key_id_ent_fin,fl_cdf,f_fec_reg_bio,
+fl_est_ibk,c_ult_usu_ibk,f_fec_cre_ibk,fl_ibk,key_id_act_eco,c_cod_obs,c_est_nit,f_fec_cla_rie_man,f_fec_ult_mod,d_nom_cli_com,c_nro_reg_mer,
+c_res,c_sec,c_sit,c_sta_elim,c_tip_cla_rie_bcp,c_tip_cla_rie_man,c_cod_cat_emp,c_cod_tip_emp,c_tip_soc,f_fec_des_neg,f_fec_ult_ing_neg,fl_neg,
+f_fec_ing,f_fec_cla_rie_bcp,key_id_tip_viv,c_nro_dep,key_id_act_eco_sec,c_est_neg,EffectiveDate,ExpirationDate,key_id_cli_orig,UpdateExisting,
+OldEffectiveDate,OldExpirationDate,UpdateEffectiveDate,UpdateExpirationDate,InsertNew,InsertEffectiveDate,InsertExpirationDate,OverwriteExisting,
+d_des_seg_cli_rie,c_prf_info,d_des_prf_info,key_id_niv_edu,key_id_est_civ,d_correo_electronico_info,d_telefono_info,d_celular_info,fl_residente_info,
+c_conyugue_idc_info,d_conyugue_nombre_info,d_conyugue_ape_pat_info,d_conyugue_ape_mat_info,key_id_pai,fl_conyugue_residente_info,d_refpersonal1_nombre_info,
+d_refpersonal1_direccion_info,d_refpersonal1_telefono_info,d_refpersonal2_nombre_info,d_refpersonal2_direccion_info,d_refpersonal2_telefono_info,
+d_refpersonal3_nombre_info,d_refpersonal3_direccion_info,d_refpersonal3_telefono_info,d_nombre_emp_info,c_cargo_info,d_des_cargo_info,d_telefono_emp_info,
+d_correo_electronico_emp_info,fl_fun_publico_info,key_id_sit_lab,d_nit_info,fl_negocio_propio_info,fl_pep_info,d_cargo_pep_info,d_periodo_pep_info,d_complemento_idc_info,
+c_residencia_pais_info,d_fax_info,d_interno_emp_info,d_fec_ingreso_trabajo_info,c_actividad_info,d_actividad_info,c_ciiu_info,d_ciiu_info,i_salario_info,
+key_id_pai_res
+)
+SELECT 
+key_id_per_bcp,key_id_cal,key_id_cal_max,c_cic,c_nac,c_fin_soc,c_idc,d_ape_pat,d_ape_mat,d_nom,d_nom_cli,d_des_nac,d_des_fin_soc,c_pri_pro_pas_ape,
+c_pri_pro_act_ape,f_fec_nac,fl_pdh,c_tip_cli,d_des_tip_cli,c_est_civ,d_des_est_civ,c_ocu,d_des_ocu,c_prf,d_des_prf,c_sex,d_des_sex,c_cod_niv_edu,
+d_des_cod_niv_edu,c_cod_niv_soc_eco,d_des_cod_niv_soc_eco,c_mag,d_des_mag,c_sta,d_des_sta,c_seg,d_des_seg,c_ban,d_des_ban,c_sub_seg,d_des_sub_seg,
+c_tip_per,d_des_tip_per,c_tip_idc,d_des_tip_idc,d_des_nit,c_ext_idc,d_des_ext_idc,c_mat_ffn,c_age,c_seg_mkt,d_seg_mkt,key_id_ent_fin,fl_cdf,f_fec_reg_bio,
+fl_est_ibk,c_ult_usu_ibk,f_fec_cre_ibk,fl_ibk,key_id_act_eco,c_cod_obs,c_est_nit,f_fec_cla_rie_man,f_fec_ult_mod,d_nom_cli_com,c_nro_reg_mer,
+c_res,c_sec,c_sit,c_sta_elim,c_tip_cla_rie_bcp,c_tip_cla_rie_man,c_cod_cat_emp,c_cod_tip_emp,c_tip_soc,f_fec_des_neg,f_fec_ult_ing_neg,fl_neg,
+f_fec_ing,f_fec_cla_rie_bcp,key_id_tip_viv,c_nro_dep,key_id_act_eco_sec,c_est_neg,EffectiveDate,ExpirationDate,key_id_cli_orig,UpdateExisting,
+OldEffectiveDate,OldExpirationDate,UpdateEffectiveDate,UpdateExpirationDate,InsertNew,InsertEffectiveDate,InsertExpirationDate,OverwriteExisting,
+d_des_seg_cli_rie,c_prf_info,d_des_prf_info,key_id_niv_edu,key_id_est_civ,d_correo_electronico_info,d_telefono_info,d_celular_info,fl_residente_info,
+c_conyugue_idc_info,d_conyugue_nombre_info,d_conyugue_ape_pat_info,d_conyugue_ape_mat_info,key_id_pai,fl_conyugue_residente_info,d_refpersonal1_nombre_info,
+d_refpersonal1_direccion_info,d_refpersonal1_telefono_info,d_refpersonal2_nombre_info,d_refpersonal2_direccion_info,d_refpersonal2_telefono_info,
+d_refpersonal3_nombre_info,d_refpersonal3_direccion_info,d_refpersonal3_telefono_info,d_nombre_emp_info,c_cargo_info,d_des_cargo_info,d_telefono_emp_info,
+d_correo_electronico_emp_info,fl_fun_publico_info,key_id_sit_lab,d_nit_info,fl_negocio_propio_info,fl_pep_info,d_cargo_pep_info,d_periodo_pep_info,d_complemento_idc_info,
+c_residencia_pais_info,d_fax_info,d_interno_emp_info,d_fec_ingreso_trabajo_info,c_actividad_info,d_actividad_info,c_ciiu_info,d_ciiu_info,i_salario_info,
+key_id_pai_res
+FROM #DIM_CLI_FINAL 
+
+
+    
+
+SET @fechaFinStatementABI = GETDATE();
+SET @fechaFinSectionABI = @fechaFinStatementABI;
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinStatementABI);
+SET @elapsedSection = DATEDIFF(millisecond,@fechaInicioSectionABI,@fechaFinSectionABI);
+SET @elapsedStatement = DATEDIFF(millisecond,@fechaInicioStatementABI,@fechaFinStatementABI);
+
+PRINT N'Fin | INSERTA DATOS EN LA DIM STG OPERACIONES |' + CONVERT(NVARCHAR(23),@fechaFinSectionABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|' + CONVERT(NVARCHAR(10),@elapsedSection) + N'|' + CONVERT(NVARCHAR(10),@elapsedStatement) + N'|';   
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','HABILITA INDICES INI',GETDATE())
+
+	ALTER INDEX  IDX_DIMCLI_EXPEFE ON BD_DWBCP.Dwh.Dim_cliente
+	REBUILD; 
+
+	ALTER INDEX IDX_DIMCLI_CIC  ON BD_DWBCP.Dwh.Dim_cliente
+    REBUILD;
+
+INSERT INTO Dwh.CONTROL_CARGA_EJECUCION
+VALUES('Dim_cliente','HABILITA INDICES FIN',GETDATE())
+
+SELECT COUNT(InsertNew) AS contador      
+FROM BD_DWBCP.Stg.Dim_cliente
+WHERE InsertNew=1 and UpdateExisting=0
+
+SET @fechaFinBatchABI = GETDATE();
+SET @elapsedBatch = DATEDIFF(millisecond,@fechaInicioBatchABI,@fechaFinBatchABI);
+
+PRINT N'Fin | Batch |' + CONVERT(NVARCHAR(23),@fechaFinBatchABI,126) + N'|' + CONVERT(NVARCHAR(10),@elapsedBatch) + N'|0|0|';   
+ 
+
+IF OBJECT_ID('tempdb..#DIM_CLI_FINAL') is not NULL DROP TABLE #DIM_CLI_FINAL
+
+
+
+
+
+
+
+GO
+
+
