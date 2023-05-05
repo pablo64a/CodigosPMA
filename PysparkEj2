@@ -1,0 +1,715 @@
+from pyspark.sql import SparkSession
+import pyspark.sql.functions as F
+from pyspark.sql.types import *
+from datetime import datetime
+from pyspark.sql.window import Window
+import datetime
+
+### Control de cambios###################################################################
+###
+### Nombre proceso: Tmp_Cliente_Infoclientes_Nat_CargaStage
+### Fecha de creacion: 2020-08-21
+### Fecha de modificacion: 2023-03-28
+### Usuario Creacion: S69570 - Pablo G. Mamani Arhuata
+### Usuario Modificacion: T28558 - Jose Maria Vargas Mendoza
+### Descripcion: Tabla temporal que almacena informacion pricipal de la fuente Infoclientes Persona Natural
+### Descripcion modificacion: Se traduce a la API nativa de PySpark, y se adicionan campos.
+### Fuentes principales: Infoclientes
+### Periodicidad de actualizacion: Rapida, la tabla se particiona por fecha
+###
+######################################################################################################################
+
+print("---------- Creacion de la sesion de Spark ----------")
+
+spark = SparkSession \
+    .builder \
+    .master("yarn") \
+    .appName("UsrBD_DWH_Tmp_Cliente_InfoclienteNat") \
+    .enableHiveSupport() \
+    .getOrCreate()
+
+print("---------- Inicio del logger ----------")
+
+#spark.sparkContext.setLogLevel("DEBUG")
+#log4jLogger = spark.sparkContext._jvm.org.apache.log4j 
+#log = log4jLogger.LogManager.getLogger("Logger - InfoClienteNat")
+
+#spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+#spark.conf.set("hive.exec.dynamic.partition.mode", "nonstrict")
+
+
+#log.debug("Establecimiento de variables de ambiente")
+
+in_dev = False
+
+servidorHDFS = "/DATA_LAKE/produccion/datos"
+
+if in_dev:
+    v_ruta_tabla = "/DATA_LAKE/certificacion/datos/enterprise.db/UsrBD_DL_Tmp_Cliente_InfoclienteNat"
+else:
+    v_ruta_tabla= "/DATA_LAKE/produccion/datos/enterprise.db/UsrBD_DL_Tmp_Cliente_InfoclienteNat"
+
+
+#log.debug("Carga de las fuentes de InfoCli")
+
+df_info_cliente = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteNat/INFO_CLIENTE")
+df_info_datopersonal = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteNat/INFO_DATOPERSONAL")
+df_info_datolaboral = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteNat/INFO_DATOLABORAL")
+df_info_datoconyugue = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteNat/INFO_DATOCONYUGE")
+df_info_profesion = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PROFESION")
+df_info_actividad = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_ACTIVIDAD")
+df_info_ciiu = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_CIIU")
+df_info_parametro_sexo = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PARAMETRO").filter(F.col("CODIGO") == "SEXO")
+df_info_parametro_estciv = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PARAMETRO").filter(F.col("CODIGO") == "ESTADO_CIVIL")
+df_info_parametro_nac = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PARAMETRO").filter(F.col("CODIGO") == "NACIONALIDAD")
+df_info_parametro_nivedu = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PARAMETRO").filter(F.col("CODIGO") == "NIVEL_EDUCACION")
+df_info_parametro_codtel = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PARAMETRO").filter(F.col("CODIGO") == "CODIGO_TELEFONO")
+df_info_parametro_cargo = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PARAMETRO").filter(F.col("CODIGO") == "CARGO")
+df_info_parametro_sitlab = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PARAMETRO").filter(F.col("CODIGO") == "SITUACION_LABORAL")
+df_info_parametro_banco = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PARAMETRO").filter(F.col("CODIGO") == "BANCO")
+df_info_parametro_produc = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PARAMETRO").filter(F.col("CODIGO") == "PRODUCTO")
+df_info_parametro_segsoc = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PARAMETRO").filter(F.col("CODIGO") == "SEGMENTO_SOCIAL")
+df_info_parametro_tipo_cuenta = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PARAMETRO").filter(F.col("CODIGO") == "TIPO_CUENTA")
+df_info_parametro_tipo_discapacidad = spark.read.parquet(servidorHDFS + "/landing.db/INFOCLIENTE/InfoClienteOtr/INFO_PARAMETRO").filter(F.col("CODIGO") == "TIPO_DISCAPACIDAD")
+DF_dim_dicdwh = spark.read.parquet(servidorHDFS + "/enterprise.db/dwh_dim_dicdwh").filter(F.col("c_cod_tip_dat") == "TBLLEX")
+
+fecha_dic = DF_dim_dicdwh \
+    .selectExpr("to_date(FROM_UNIXTIME(UNIX_TIMESTAMP(c_cod_fue,'yyyyMMdd'))) as v_fecha") \
+    .filter((F.col("c_cod_tip_dat") == "TBLLEX") & (F.col("d_des_dim") == "FECHADIA"))
+    
+v_fecha = fecha_dic.first()[0]
+fec_part = int(v_fecha.strftime('%Y%m%d'))
+
+#log.debug("Finalizacion de carga de fuentes")
+
+
+#log.debug("Creacion de la base para parametrizacion")
+
+df_base = df_info_cliente \
+    .withColumn(
+        "IDC_CLI",
+        F.expr("CASE WHEN CAST(TRIM(IDC) AS DOUBLE) IS NULL THEN SUBSTRING(TRIM(IDC),1,instr(TRIM(IDC),substring(REGEXP_EXTRACT(TRIM(IDC),'[a-zA-Z]+', 0),1,1))-1) ELSE TRIM(IDC) END")
+    ) \
+    .withColumn(
+        "IDC_TIP_CLI",
+        F.expr("CASE WHEN CAST(TRIM(IDC) AS DOUBLE) IS NULL THEN SUBSTRING(TRIM(IDC),instr(TRIM(IDC),substring(REGEXP_EXTRACT(TRIM(IDC),'[a-zA-Z]+', 0),1,1)),1) ELSE '' END")
+    ) \
+    .withColumn(
+        "IDC_EXT_CLI",
+        F.expr("CASE WHEN CAST(TRIM(IDC) AS DOUBLE) IS NULL THEN SUBSTRING(TRIM(IDC),instr(TRIM(IDC),substring(REGEXP_EXTRACT(TRIM(IDC),'[a-zA-Z]+', 0),1,1))+1,3) ELSE '' END")
+    ) \
+    .join(
+        df_info_datopersonal,
+        on = ["CLIENTE_ID"],
+        how = "inner"
+    ) \
+    .withColumn(
+        "CORREO_ELECTRONICO_CDP",
+        F.expr("SUBSTRING(CASE WHEN INSTR(COALESCE(CORREO_ELECTRONICO,''),';')>0 THEN TRIM(SUBSTRING(COALESCE(CORREO_ELECTRONICO,''),1,INSTR(COALESCE(CORREO_ELECTRONICO,''),';'))) ELSE COALESCE(TRIM(CORREO_ELECTRONICO),'') END,1,50)")
+    ) \
+    .withColumn(
+        "CONYUGUE_IDC_CDP",
+        F.expr("CASE WHEN CAST(TRIM(CONY_IDC) AS DOUBLE) IS NULL AND LENGTH(TRIM(CONY_IDC))>8 THEN SUBSTRING(TRIM(CONY_IDC),1,instr(TRIM(CONY_IDC),substring(REGEXP_EXTRACT(TRIM(CONY_IDC),'[a-zA-Z]+', 0),1,1))-1) ELSE TRIM(CONY_IDC) END")
+    ) \
+    .withColumn(
+        "CONYUGUE_TIP_IDC_CDP",
+        F.expr("CASE WHEN CAST(TRIM(CONY_IDC) AS DOUBLE) IS NULL AND LENGTH(TRIM(CONY_IDC))>8 THEN SUBSTRING(TRIM(CONY_IDC),instr(TRIM(CONY_IDC),substring(REGEXP_EXTRACT(TRIM(CONY_IDC),'[a-zA-Z]+', 0),1,1)),1) ELSE '' END")
+    ) \
+    .withColumn(
+        "CONYUGUE_IDC_EXT_CDP",
+        F.expr("CASE WHEN CAST(TRIM(CONY_IDC) AS DOUBLE) IS NULL AND LENGTH(TRIM(CONY_IDC))>8 THEN SUBSTRING(TRIM(CONY_IDC),instr(TRIM(CONY_IDC),substring(REGEXP_EXTRACT(TRIM(CONY_IDC),'[a-zA-Z]+', 0),1,1))+1,3) ELSE '' END")
+    ) \
+    .join(
+        df_info_datolaboral.alias("df_info_datolaboral"),
+        on = ["CLIENTE_ID"],
+        how = "inner"
+    ) \
+    .withColumn(
+        "CORREO_ELECTRONICO_CDL",
+        F.expr("SUBSTRING(COALESCE(df_info_datolaboral.CORREO_ELECTRONICO,''),1,50)")
+    ) \
+    .join(
+        df_info_datoconyugue,
+        on = ["CLIENTE_ID"],
+        how = "left"
+    ) \
+    .join(
+        df_info_profesion.alias("PROF_DP"),
+        on = df_info_datopersonal.PROFESION_ID == F.col("PROF_DP.PROFESION_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_profesion.alias("CONY_PROF_DP"),
+        on = df_info_datopersonal.CONY_PROFESION_ID == F.col("CONY_PROF_DP.PROFESION_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_actividad.alias("ACT_DL"),
+        on = df_info_datolaboral.ACTIVIDAD_ID == F.col("ACT_DL.ACTIVIDAD_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_actividad.alias("CONY_ACT_DC"),
+        on = df_info_datoconyugue.ACTIVIDAD_ID_01 == F.col("CONY_ACT_DC.ACTIVIDAD_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_ciiu.alias("CIIU_DL"),
+        on = df_info_datolaboral.CIIU_ID == F.col("CIIU_DL.CIIU_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_ciiu.alias("CONY_CIIU_DC"),
+        on = df_info_datoconyugue.CIIU_ID_01 == F.col("CONY_CIIU_DC.CIIU_ID"),
+        how = "left"
+    ) \
+    .select(
+        F.col("CIC").alias("CIC_CLI"),
+        "IDC_CLI",
+        "IDC_TIP_CLI",
+        "IDC_EXT_CLI",
+        F.coalesce(F.col("COMPLEMENTO_IDC"), F.lit("00")).alias("COMPLEMENTO_IDC_CLI"),
+        F.col("NOMBRE").alias("NOMBRE_CLI"),
+        F.col("PATERNO").alias("PATERNO_CLI"),
+        F.col("MATERNO").alias("MATERNO_CLI"),
+        F.coalesce(F.trim(F.col("FECHA_NAC")), F.lit("")).alias("FECHA_NAC_CDP"),
+        F.coalesce(F.trim(F.col("SEXO_ID")), F.lit("")).alias("ID_SEXO_CDP"),
+        F.trim(F.col("ESTADOCIVIL_ID")).alias("ID_ESTCIVIL_CDP"),
+        F.trim(F.col("NACIONALIDAD_ID")).alias("ID_NACIONALIDAD_CDP"),
+        F.trim(F.col("PROF_DP.PROFESION_ID")).alias("ID_PROFESION_CDP"),
+        F.trim(F.col("GRADO_INSTRUCCION_ID")).alias("ID_INSTRUCCION_CDP"),
+        F.coalesce(F.col("SEGMENTO_SOCIAL_ID"), F.lit(1)).alias("ID_SEGSOCIAL_CDP"),
+        F.coalesce(F.col("TIPO_CUENTA_ID"), F.lit(1)).alias("ID_TIPO_CUENTA_CDP"),
+        F.coalesce(F.col("LIMITACION"), F.lit(False)).alias("FL_DISCAPACIDAD_CDP"),
+        F.coalesce(F.col("TIPO_LIMITACION"), F.lit(1)).alias("ID_TIPO_DISCAPACIDAD_CDP"),
+        "CORREO_ELECTRONICO_CDP",
+        F.coalesce(F.trim(df_info_datopersonal.TELEFONO), F.lit("")).alias("TELEFONO_CDP"),
+        F.coalesce(F.trim(df_info_datopersonal.CELULAR), F.lit("")).alias("CELULAR_CDP"),
+        F.trim(df_info_datopersonal.COD_TELEFONO_ID).alias("ID_COD_TELEFONO_CDP"),
+        F.trim(df_info_datopersonal.COD_CELULAR_ID).alias("ID_COD_CELULAR_CDP"),
+        F.trim(F.col("RESIDENTE")).alias("FL_RESIDENTE_CDP"),
+        F.trim(F.col("CONY_IDC")).alias("CONY_IDC"),
+        "CONYUGUE_IDC_CDP",
+        "CONYUGUE_TIP_IDC_CDP",
+        "CONYUGUE_IDC_EXT_CDP",
+        F.coalesce(F.col("CONY_COMPLEMENTO_IDC"), F.lit("00")).alias("CONY_COMPLEMENTO_IDC_CDP"),
+        F.trim(F.col("CONY_NOMBRE")).alias("CONYUGUE_NOMBRE_CDP"),
+        F.trim(F.col("CONY_PATERNO")).alias("CONYUGUE_PATERNO_CDP"),
+        F.trim(F.col("CONY_MATERNO")).alias("CONYUGUE_MATERNO_CDP"),
+        F.coalesce(F.trim(F.col("CONY_FECHA_NAC")), F.lit("")).alias("CONYUGUE_FECHA_NAC_CDP"),
+        F.trim(F.col("CONY_PROFESION_ID")).alias("CONYUGUE_PROFESION_CDP"),
+        F.trim(F.col("CONY_SITUACION_LAB_ID")).alias("CONYUGUE_ID_SITUACIONLABORAL_CDP"),
+        F.trim(F.col("CONY_NACIONALIDAD_ID")).alias("CONYUGUE_ID_NACIONALIDAD_CDP"),
+        F.coalesce(F.trim(F.col("CONY_TELEFONO")), F.lit("")).alias("CONYUGUE_TELEFONO_CDP"),
+        F.coalesce(F.col("RESIDENCIA_CONY_PAIS"), F.lit(1)).alias("CONYUGUE_RESIDENCIA_PAIS_CDP"),
+        F.trim(F.col("CONY_RESIDENTE")).alias("CONYUGUE_FL_RESIDENTE_CDP"),
+        F.coalesce(F.col("CONY_NOMBRE_EMP"), F.lit("")).alias("CONYUGUE_NOMBRE_EMPRESA_CDP"),
+        F.col("CONY_CARGO_ID").alias("CONYUGUE_ID_CARGO_ACTUAL_CDP"),
+        F.col("CONY_INGRESO").alias("CONYUGUE_SALARIO_CDP"),
+        F.col("CONY_OTROS_INGRESOS").alias("CONYUGUE_OTROS_INGRESOS_CDP"),
+        F.coalesce(F.col("CONY_FECHA_ING"), F.lit("")).alias("CONYUGUE_FECHA_LUGAR_TRABAJO_CDP"),
+        F.col("SITUACION_LABORAL_ID_01").alias("CONYUGUE_ID_SITUACIONLABORAL_CDC"),
+        F.col("ACTIVIDAD_ID_01").alias("CONYUGUE_ID_ACTIVIDAD_CDC"),
+        F.col("CIIU_ID_01").alias("CONYUGUE_ID_CIIU_CDC"),
+        F.coalesce(F.col("RESIDENCIA_PAIS"), F.lit(1)).alias("RESIDENCIA_PAIS_CDP"),
+        F.coalesce(F.col("RESIDENTE").cast(IntegerType()), F.lit(0)).alias("RESIDENTE_CDP"),
+        F.coalesce(F.col("FAX"), F.lit("")).alias("FAX_CDP"),
+        F.coalesce(F.col("NRO_NIT_PERSONAL"), F.lit("")).alias("NIT_PERSONAL_CDP"),
+        F.coalesce(F.col("RAZON_SOCIAL_PERSONAL"), F.lit("")).alias("RAZON_SOCIAL_CDP"),
+        F.coalesce(F.col("REFPER1_NOMBRE"), F.lit("")).alias("REFPERSONAL1_NOMBRE_CDP"),
+        F.coalesce(F.col("REFPER1_DIRECCION"), F.lit("")).alias("REFPERSONAL1_DIRECCION_CDP"),
+        F.coalesce(F.col("REFPER1_TELEFONO"), F.lit("")).alias("REFPERSONAL1_TELEFONO_CDP"),
+        F.coalesce(F.col("REFPER2_NOMBRE"), F.lit("")).alias("REFPERSONAL2_NOMBRE_CDP"),
+        F.coalesce(F.col("REFPER2_DIRECCION"), F.lit("")).alias("REFPERSONAL2_DIRECCION_CDP"),
+        F.coalesce(F.col("REFPER2_TELEFONO"), F.lit("")).alias("REFPERSONAL2_TELEFONO_CDP"),
+        F.coalesce(F.col("REFPER3_NOMBRE"), F.lit("")).alias("REFPERSONAL3_NOMBRE_CDP"),
+        F.coalesce(F.col("REFPER3_DIRECCION"), F.lit("")).alias("REFPERSONAL3_DIRECCION_CDP"),
+        F.coalesce(F.col("REFPER3_TELEFONO"), F.lit("")).alias("REFPERSONAL3_TELEFONO_CDP"),
+        F.col("REFCOM1_NOMBRE").alias("REFCOMERCIAL1_NOMBRE_CDP"),
+        F.col("REFCOM1_DIRECCION").alias("REFCOMERCIAL1_DIRECCION_CDP"),
+        F.col("REFCOM1_TELEFONO").alias("REFCOMERCIAL1_TELEFONO_CDP"),
+        F.col("REFCOM2_NOMBRE").alias("REFCOMERCIAL2_NOMBRE_CDP"),
+        F.col("REFCOM2_DIRECCION").alias("REFCOMERCIAL2_DIRECCION_CDP"),
+        F.col("REFCOM2_TELEFONO").alias("REFCOMERCIAL2_TELEFONO_CDP"),
+        F.col("REFCOM3_NOMBRE").alias("REFCOMERCIAL3_NOMBRE_CDP"),
+        F.col("REFCOM3_DIRECCION").alias("REFCOMERCIAL3_DIRECCION_CDP"),
+        F.col("REFCOM3_TELEFONO").alias("REFCOMERCIAL3_TELEFONO_CDP"),
+        F.coalesce(F.col("NOMBRE_EMPRESA"), F.lit("")).alias("NOMBRE_EMPRESA_CDL"),  
+        F.col("CARGO_ID").alias("ID_CARGO_ACTUAL_CDL"),
+        F.coalesce(df_info_datolaboral.TELEFONO, F.lit("")).alias("TELEFONO_EMPRESA_CDL"),
+        F.coalesce(df_info_datolaboral.CELULAR, F.lit("")).alias("CELULAR_EMPRESA_CDL"),
+        F.trim(df_info_datolaboral.COD_TELEFONO_ID).alias("ID_COD_TELEFONO_EMPRESA_CDL"),
+        "CORREO_ELECTRONICO_CDL",
+        F.coalesce(F.when(F.col("FUNCIONARIO_PUBLICO") == True, F.lit(1)).otherwise(F.lit(0)), F.lit(0)).alias("FL_FUN_PUBLICO_CDL"),
+        F.col("SITUACION_LABORAL_ID").alias("ID_SITUACIONLABORAL_CDL"),
+        F.coalesce(F.col("NIT"), F.lit("")).alias("NIT_CDL"),
+        F.col("SALARIO").alias("SALARIO_CDL"),
+        df_info_datolaboral.ACTIVIDAD_ID.alias("ID_ACTIVIDAD_CDL"),
+        F.col("CIIU_DL.CIIU_ID").alias("ID_CIIU_CDL"),
+        F.col("NEGOCIO_PROPIO").alias("FL_NEGOCIO_PROPIO_CDL"),
+        F.coalesce(df_info_datolaboral.ANEXO_TELEFONO, F.lit("")).alias("INTERNO_EMPRESA_CDL"),
+        F.coalesce(F.col("FECHA_LUGAR_TRABAJO"), F.lit("")).alias("FECHA_LUGAR_TRABAJO_CDL"),
+        F.coalesce(F.when(F.col("CARGO_PUBLICO") == True, F.lit(1)).otherwise(F.lit(0)), F.lit(0)).alias("FL_PEP_CDL"),
+        F.col("CARGO").alias("CARGO_PEP_CDL"),
+        F.col("PERIODO").alias("PERIODO_PEP_CDL"), 
+        F.col("BANCO1_ID").alias("ID_BANCO1_CDP"), 
+        F.col("PRODUCTO1_ID").alias("ID_PRODUCTO1_CDP"), 
+        F.col("BANCO2_ID").alias("ID_BANCO2_CDP"), 
+        F.col("PRODUCTO2_ID").alias("ID_PRODUCTO2_CDP"),
+        F.col("BANCO3_ID").alias("ID_BANCO3_CDP"), 
+        F.col("PRODUCTO3_ID").alias("ID_PRODUCTO3_CDP"),
+        F.coalesce(F.col("BANCO1_OTRO"), F.lit("")).alias("OTRO_BANCO_1"),
+        F.coalesce(F.col("BANCO2_OTRO"), F.lit("")).alias("OTRO_BANCO_2"),
+        F.coalesce(F.col("BANCO3_OTRO"), F.lit("")).alias("OTRO_BANCO_3"),
+        F.coalesce(F.col("PROF_DP.PROFESION_ID"), F.lit("NDI")).cast(StringType()).alias("C_PRF_CDP"),
+        F.coalesce(F.col("PROF_DP.DESCRIPCION_PROF"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_PRF_CDP"),
+        F.coalesce(F.col("CONY_PROF_DP.PROFESION_ID"), F.lit("NDI")).cast(StringType()).alias("C_CONY_PRF_CDP"),
+        F.coalesce(F.col("CONY_PROF_DP.DESCRIPCION_PROF"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_CONY_PRF_CDP"),
+        F.coalesce(F.when(F.col("ACT_DL.CODIGO") == "GENERICO", F.lit("NDI")).otherwise(F.col("ACT_DL.CODIGO")), F.lit("NDI")).cast(StringType()).alias("C_ACTIVIDAD_CDL"),
+        F.coalesce(F.col("ACT_DL.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_ACTIVIDAD_CDL"),
+        F.coalesce(F.when(F.col("CONY_ACT_DC.CODIGO") == "GENERICO", F.lit("NDI")).otherwise(F.col("CONY_ACT_DC.CODIGO")), F.lit("NDI")).cast(StringType()).alias("C_CONY_ACTIVIDAD_CDC"),
+        F.coalesce(F.col("CONY_ACT_DC.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_CONY_ACTIVIDAD_CDC"),
+        F.coalesce(F.col("CIIU_DL.CODIGO"), F.lit("NDI")).cast(StringType()).alias("C_CIIU_CDL"),
+        F.coalesce(F.col("CIIU_DL.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_CIIU_CDL"),
+        F.coalesce(F.col("CONY_CIIU_DC.CODIGO"), F.lit("NDI")).cast(StringType()).alias("C_CONY_CIIU_CDC"),
+        F.coalesce(F.col("CONY_CIIU_DC.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_CONY_CIIU_CDC"),
+        F.coalesce(F.col("PARIENTE_PEP"), F.lit(False)).alias("FL_PARIENTE_PEP_CDL"),
+        F.coalesce(F.col("ASOCIADO_PEP"), F.lit(False)).alias("FL_ASOCIADO_PEP_CDL"),
+        F.coalesce(F.col("INSTITUCION_PUBLICA"), F.lit("")).alias("INSTITUCION_PUBLICA_CDL"),
+        F.coalesce(F.col("FUNCIONARIO_NEGOCIOS"), F.lit("")).alias("FUNC_NEG_CDP"),
+        F.coalesce(F.col("DESMATERIALIZACION"), F.lit("")).alias("DESMATERIALIZACION_CDP"),
+        F.coalesce(df_info_cliente.FECHA_ULTIMA_MODIFICACION, df_info_cliente.FECHA_CREACION).alias("FECHA_ULTIMA_MODIFICACION"),
+        F.max(F.coalesce(df_info_cliente.FECHA_ULTIMA_MODIFICACION, df_info_cliente.FECHA_CREACION)).over(Window.partitionBy(df_info_cliente.CIC)).alias("FECHA_ULTIMA_MODIFICACION_FL")
+    )
+
+#log.debug("Creacion del dataframe parametrizado")
+
+df_parametrizado = df_base \
+    .join(
+        df_info_parametro_sexo,
+        on = df_base.ID_SEXO_CDP == df_info_parametro_sexo.PARAM_ID,
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_estciv,
+        on = df_base.ID_ESTCIVIL_CDP == df_info_parametro_estciv.PARAM_ID,
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_nac.alias("NAC_CLIENTE"),
+        on = df_base.ID_NACIONALIDAD_CDP == F.col("NAC_CLIENTE.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_nivedu,
+        on = df_base.ID_INSTRUCCION_CDP == df_info_parametro_nivedu.PARAM_ID,
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_codtel.alias("TEL_DP"),
+        on = df_base.ID_COD_TELEFONO_CDP == F.col("TEL_DP.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_codtel.alias("CEL_DP"),
+        on = df_base.ID_COD_TELEFONO_CDP == F.col("CEL_DP.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_codtel.alias("TEL_DL"),
+        on = df_base.ID_COD_TELEFONO_CDP == F.col("TEL_DL.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_nac.alias("NAC_CONY"),
+        on = df_base.CONYUGUE_ID_NACIONALIDAD_CDP == F.col("NAC_CONY.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_cargo.alias("CARGO_DP"),
+        on = df_base.ID_CARGO_ACTUAL_CDL == F.col("CARGO_DP.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_cargo.alias("CONY_CARGO_DP"),
+        on = df_base.CONYUGUE_ID_CARGO_ACTUAL_CDP == F.col("CONY_CARGO_DP.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_sitlab.alias("SITLAB_DP"),
+        on = df_base.ID_SITUACIONLABORAL_CDL == F.col("SITLAB_DP.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_sitlab.alias("CONY_SITLAB_DP"),
+        on = df_base.CONYUGUE_ID_SITUACIONLABORAL_CDP == F.col("CONY_SITLAB_DP.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_sitlab.alias("CONY_SITLAB_DC"),
+        on = df_base.CONYUGUE_ID_SITUACIONLABORAL_CDC == F.col("CONY_SITLAB_DC.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_segsoc,
+        on = df_base.ID_SEGSOCIAL_CDP == df_info_parametro_segsoc.PARAM_ID,
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_banco.alias("BANCO_1"),
+        on = df_base.ID_BANCO1_CDP == F.col("BANCO_1.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_produc.alias("PRODUCTO_1"),
+        on = df_base.ID_PRODUCTO1_CDP == F.col("PRODUCTO_1.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_banco.alias("BANCO_2"),
+        on = df_base.ID_BANCO2_CDP == F.col("BANCO_2.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_produc.alias("PRODUCTO_2"),
+        on = df_base.ID_PRODUCTO2_CDP == F.col("PRODUCTO_2.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_banco.alias("BANCO_3"),
+        on = df_base.ID_BANCO3_CDP == F.col("BANCO_3.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_produc.alias("PRODUCTO_3"),
+        on = df_base.ID_PRODUCTO3_CDP == F.col("PRODUCTO_3.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_nac.alias("PAIS_RES"),
+        on = df_base.RESIDENCIA_PAIS_CDP == F.col("PAIS_RES.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_nac.alias("CONY_PAIS_RES"),
+        on = df_base.CONYUGUE_RESIDENCIA_PAIS_CDP == F.col("CONY_PAIS_RES.PARAM_ID"),
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_tipo_cuenta,
+        on = df_base.ID_TIPO_CUENTA_CDP == df_info_parametro_tipo_cuenta.PARAM_ID,
+        how = "left"
+    ) \
+    .join(
+        df_info_parametro_tipo_discapacidad,
+        on = df_base.ID_TIPO_DISCAPACIDAD_CDP == df_info_parametro_tipo_discapacidad.PARAM_ID,
+        how = "left"
+    ) \
+    .select(
+        df_base.CIC_CLI,
+        df_base.IDC_CLI,
+        df_base.IDC_TIP_CLI,
+        df_base.IDC_EXT_CLI,
+        df_base.COMPLEMENTO_IDC_CLI,
+        df_base.NOMBRE_CLI,
+        df_base.PATERNO_CLI,
+        df_base.MATERNO_CLI,
+        df_base.FECHA_NAC_CDP,
+        df_base.ID_SEXO_CDP,
+        df_base.ID_ESTCIVIL_CDP,
+        df_base.ID_NACIONALIDAD_CDP,
+        df_base.ID_PROFESION_CDP,
+        df_base.ID_INSTRUCCION_CDP,
+        df_base.ID_SEGSOCIAL_CDP,
+        df_base.ID_TIPO_CUENTA_CDP,
+        df_base.FL_DISCAPACIDAD_CDP,
+        df_base.ID_TIPO_DISCAPACIDAD_CDP,
+        df_base.CORREO_ELECTRONICO_CDP,
+        df_base.TELEFONO_CDP,
+        df_base.CELULAR_CDP,
+        df_base.ID_COD_TELEFONO_CDP,
+        df_base.ID_COD_CELULAR_CDP,
+        df_base.FL_RESIDENTE_CDP,
+        df_base.CONY_IDC,
+        df_base.CONYUGUE_IDC_CDP,
+        df_base.CONYUGUE_TIP_IDC_CDP,
+        df_base.CONYUGUE_IDC_EXT_CDP,
+        df_base.CONY_COMPLEMENTO_IDC_CDP,
+        df_base.CONYUGUE_NOMBRE_CDP,
+        df_base.CONYUGUE_PATERNO_CDP,
+        df_base.CONYUGUE_MATERNO_CDP,
+        df_base.CONYUGUE_FECHA_NAC_CDP,
+        df_base.CONYUGUE_PROFESION_CDP,
+        df_base.CONYUGUE_ID_SITUACIONLABORAL_CDP,
+        df_base.CONYUGUE_ID_NACIONALIDAD_CDP,
+        df_base.CONYUGUE_TELEFONO_CDP,
+        df_base.CONYUGUE_RESIDENCIA_PAIS_CDP,
+        df_base.CONYUGUE_FL_RESIDENTE_CDP,
+        df_base.CONYUGUE_NOMBRE_EMPRESA_CDP,
+        df_base.CONYUGUE_ID_CARGO_ACTUAL_CDP,
+        df_base.CONYUGUE_SALARIO_CDP,
+        df_base.CONYUGUE_OTROS_INGRESOS_CDP,
+        df_base.CONYUGUE_FECHA_LUGAR_TRABAJO_CDP,
+        df_base.CONYUGUE_ID_SITUACIONLABORAL_CDC,
+        df_base.CONYUGUE_ID_ACTIVIDAD_CDC,
+        df_base.CONYUGUE_ID_CIIU_CDC,
+        df_base.RESIDENCIA_PAIS_CDP,
+        df_base.RESIDENTE_CDP,
+        df_base.FAX_CDP,
+        df_base.NIT_PERSONAL_CDP,
+        df_base.RAZON_SOCIAL_CDP,
+        df_base.REFPERSONAL1_NOMBRE_CDP,
+        df_base.REFPERSONAL1_DIRECCION_CDP,
+        df_base.REFPERSONAL1_TELEFONO_CDP,
+        df_base.REFPERSONAL2_NOMBRE_CDP,
+        df_base.REFPERSONAL2_DIRECCION_CDP,
+        df_base.REFPERSONAL2_TELEFONO_CDP,
+        df_base.REFPERSONAL3_NOMBRE_CDP,
+        df_base.REFPERSONAL3_DIRECCION_CDP,
+        df_base.REFPERSONAL3_TELEFONO_CDP,
+        df_base.REFCOMERCIAL1_NOMBRE_CDP,
+        df_base.REFCOMERCIAL1_DIRECCION_CDP,
+        df_base.REFCOMERCIAL1_TELEFONO_CDP,
+        df_base.REFCOMERCIAL2_NOMBRE_CDP,
+        df_base.REFCOMERCIAL2_DIRECCION_CDP,
+        df_base.REFCOMERCIAL2_TELEFONO_CDP,
+        df_base.REFCOMERCIAL3_NOMBRE_CDP,
+        df_base.REFCOMERCIAL3_DIRECCION_CDP,
+        df_base.REFCOMERCIAL3_TELEFONO_CDP,
+        df_base.NOMBRE_EMPRESA_CDL,
+        df_base.ID_CARGO_ACTUAL_CDL,
+        df_base.TELEFONO_EMPRESA_CDL,
+        df_base.CELULAR_EMPRESA_CDL,
+        df_base.ID_COD_TELEFONO_EMPRESA_CDL,
+        df_base.CORREO_ELECTRONICO_CDL,
+        df_base.FL_FUN_PUBLICO_CDL,
+        df_base.ID_SITUACIONLABORAL_CDL,
+        df_base.NIT_CDL,
+        df_base.SALARIO_CDL,
+        df_base.ID_ACTIVIDAD_CDL,
+        df_base.ID_CIIU_CDL,
+        df_base.FL_NEGOCIO_PROPIO_CDL,
+        df_base.INTERNO_EMPRESA_CDL,
+        df_base.FECHA_LUGAR_TRABAJO_CDL,
+        df_base.FL_PEP_CDL,
+        df_base.CARGO_PEP_CDL,
+        df_base.PERIODO_PEP_CDL,
+        df_base.ID_BANCO1_CDP,
+        df_base.ID_PRODUCTO1_CDP,
+        df_base.ID_BANCO2_CDP,
+        df_base.ID_PRODUCTO2_CDP,
+        df_base.ID_BANCO3_CDP,
+        df_base.ID_PRODUCTO3_CDP,
+        df_base.OTRO_BANCO_1,
+        df_base.OTRO_BANCO_2,
+        df_base.OTRO_BANCO_3,
+        df_base.C_PRF_CDP,
+        df_base.D_PRF_CDP,
+        df_base.C_CONY_PRF_CDP,
+        df_base.D_CONY_PRF_CDP,
+        df_base.C_ACTIVIDAD_CDL,
+        df_base.D_ACTIVIDAD_CDL,
+        df_base.C_CONY_ACTIVIDAD_CDC,
+        df_base.D_CONY_ACTIVIDAD_CDC,
+        df_base.C_CIIU_CDL,
+        df_base.D_CIIU_CDL,
+        df_base.C_CONY_CIIU_CDC,
+        df_base.D_CONY_CIIU_CDC,
+        df_base.FL_PARIENTE_PEP_CDL,
+        df_base.FL_ASOCIADO_PEP_CDL,
+        df_base.INSTITUCION_PUBLICA_CDL,
+        df_base.FUNC_NEG_CDP,
+        df_base.DESMATERIALIZACION_CDP,
+        df_base.FECHA_ULTIMA_MODIFICACION,
+        df_base.FECHA_ULTIMA_MODIFICACION_FL,
+        F.coalesce(df_info_parametro_sexo.ABREV_DESCRIPCION, F.lit("NDI")).cast(StringType()).alias("C_SEX_CDP"),
+        F.coalesce(df_info_parametro_sexo.DESCRIPCION, F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_SEX_CDP"),
+        F.coalesce(df_info_parametro_estciv.ABREV_DESCRIPCION, F.lit("NDI")).cast(StringType()).alias("C_EST_CIV_CDP"),
+        F.coalesce(df_info_parametro_estciv.DESCRIPCION, F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_EST_CIV_CDP"),
+        F.coalesce(df_info_parametro_segsoc.ABREV_DESCRIPCION, F.lit("NDI")).cast(StringType()).alias("C_SEGSOC_CDP"),
+        F.coalesce(df_info_parametro_segsoc.DESCRIPCION, F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_SEGSOC_CDP"),
+        F.coalesce(df_info_parametro_tipo_discapacidad.ABREV_DESCRIPCION, F.lit("NDI")).cast(StringType()).alias("C_TIPDISC_CDP"),
+        F.coalesce(df_info_parametro_tipo_discapacidad.DESCRIPCION, F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_TIPDISC_CDP"),
+        F.coalesce(df_info_parametro_tipo_cuenta.ABREV_DESCRIPCION, F.lit("NDI")).cast(StringType()).alias("C_TIPCTA_CDP"),
+        F.coalesce(df_info_parametro_tipo_cuenta.DESCRIPCION, F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_TIPCTA_CDP"),
+        F.coalesce(F.col("NAC_CLIENTE.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_NAC_CDP"),
+        F.coalesce(F.col("NAC_CLIENTE.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_NAC_CDP"),
+        F.coalesce(df_info_parametro_nivedu.ABREV_DESCRIPCION, F.lit("NDI")).cast(StringType()).alias("C_COD_NIV_EDU_CDP"),
+        F.coalesce(df_info_parametro_nivedu.DESCRIPCION, F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_COD_NIV_EDU_CDP"),
+        F.coalesce(F.col("TEL_DP.DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_COD_TELEFONO_CDP"),
+        F.coalesce(F.col("CEL_DP.DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_COD_CELULAR_CDP"),
+        F.coalesce(F.col("TEL_DL.DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_COD_TELEFONO_TRABAJO_CDP"),
+        F.coalesce(F.col("NAC_CONY.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_NAC_CONYUGUE_CDP"),
+        F.coalesce(F.col("NAC_CONY.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_NAC_CONYUGUE_CDP"),
+        F.coalesce(F.col("CARGO_DP.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_CARGO_CDL"),
+        F.coalesce(F.col("CARGO_DP.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_CARGO_CDL"),
+        F.coalesce(F.col("CONY_CARGO_DP.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_CONY_CARGO_CDL"),
+        F.coalesce(F.col("CONY_CARGO_DP.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_CONY_CARGO_CDL"),
+        F.coalesce(F.col("SITLAB_DP.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_OCU_CDL"),
+        F.coalesce(F.col("SITLAB_DP.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_OCU_CDL"),
+        F.coalesce(F.col("CONY_SITLAB_DP.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_CONY_OCU_01_CDP"),
+        F.coalesce(F.col("CONY_SITLAB_DP.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_CONY_OCU_01_CDP"),
+        F.coalesce(F.col("CONY_SITLAB_DC.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_CONY_OCU_02_CDL"),
+        F.coalesce(F.col("CONY_SITLAB_DC.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_CONY_OCU_02_CDL"),
+        F.coalesce(F.col("BANCO_1.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_BANCO1_CDP"),
+        F.coalesce(F.col("BANCO_1.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_BANCO1_CDP"),
+        F.coalesce(F.col("BANCO_2.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_BANCO2_CDP"),
+        F.coalesce(F.col("BANCO_2.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_BANCO2_CDP"),
+        F.coalesce(F.col("BANCO_3.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_BANCO3_CDP"),
+        F.coalesce(F.col("BANCO_3.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_BANCO3_CDP"),
+        F.coalesce(F.col("PRODUCTO_1.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_PRODUCTO1_CDP"),
+        F.coalesce(F.col("PRODUCTO_1.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_PRODUCTO1_CDP"),
+        F.coalesce(F.col("PRODUCTO_2.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_PRODUCTO2_CDP"),
+        F.coalesce(F.col("PRODUCTO_2.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_PRODUCTO2_CDP"),
+        F.coalesce(F.col("PRODUCTO_3.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_PRODUCTO3_CDP"),
+        F.coalesce(F.col("PRODUCTO_3.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_PRODUCTO3_CDP"),
+        F.coalesce(F.col("PAIS_RES.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_PAIS_RES_CDP"),
+        F.coalesce(F.col("PAIS_RES.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_PAIS_RES_CDP"),
+        F.coalesce(F.col("CONY_PAIS_RES.ABREV_DESCRIPCION"), F.lit("NDI")).cast(StringType()).alias("C_PAIS_RES_CONYUGUE_CDP"),
+        F.coalesce(F.col("CONY_PAIS_RES.DESCRIPCION"), F.lit("NO ESPECIFICA")).cast(StringType()).alias("D_DES_PAIS_RES_CONYUGUE_CDP")
+    )
+
+
+#log.debug("Creacion del dataframe final para escritura")
+
+df_final = df_parametrizado \
+    .filter(F.col("FECHA_ULTIMA_MODIFICACION") == F.col("FECHA_ULTIMA_MODIFICACION_FL")) \
+    .select(
+        F.col("CIC_CLI").alias("c_cic"),
+        F.col("IDC_CLI").alias("c_idc"),
+        F.col("IDC_TIP_CLI").alias("c_tip_idc"),
+        F.col("IDC_EXT_CLI").alias("c_ext_idc"),
+        F.col("COMPLEMENTO_IDC_CLI").alias("d_complemento_idc_info"),
+        F.col("NOMBRE_CLI").alias("d_nom"),
+        F.col("PATERNO_CLI").alias("d_ape_pat"),
+        F.col("MATERNO_CLI").alias("d_ape_mat"),
+        F.col("FECHA_NAC_CDP").alias("f_fec_nac"),
+        F.col("C_SEX_CDP").alias("c_sex"),
+        F.col("D_DES_SEX_CDP").alias("d_des_sex"),
+        F.col("C_SEGSOC_CDP").alias("c_seg_soc"),
+        F.col("D_DES_SEGSOC_CDP").alias("d_des_seg_soc"),
+        F.col("C_TIPCTA_CDP").alias("c_tip_cta"),
+        F.col("D_DES_TIPCTA_CDP").alias("d_des_tip_cta"),
+        F.col("FL_DISCAPACIDAD_CDP").alias("fl_discapacidad"),
+        F.col("C_TIPDISC_CDP").alias("c_tip_disc"),
+        F.col("D_DES_TIPDISC_CDP").alias("d_des_tip_disc"),
+        F.col("C_EST_CIV_CDP").alias("c_est_civ"),
+        F.col("D_DES_EST_CIV_CDP").alias("d_des_est_civ"),
+        F.col("C_NAC_CDP").alias("c_nac"),
+        F.col("D_DES_NAC_CDP").alias("d_des_nac"),
+        F.col("C_PRF_CDP").alias("c_prf"),
+        F.col("D_PRF_CDP").alias("d_des_prf"),
+        F.col("C_COD_NIV_EDU_CDP").alias("c_cod_niv_edu"),
+        F.col("D_DES_COD_NIV_EDU_CDP").alias("d_des_cod_niv_edu"),
+        F.col("CORREO_ELECTRONICO_CDP").alias("d_correo_electronico"),
+        F.col("TELEFONO_CDP").alias("d_telefono"),
+        F.col("C_COD_TELEFONO_CDP").alias("c_cod_telefono"),
+        F.col("CELULAR_CDP").alias("d_celular"),
+        F.col("C_COD_CELULAR_CDP").alias("c_cod_celular"),
+        F.col("FL_RESIDENTE_CDP").alias("fl_residente_cdp"),
+        F.col("CONYUGUE_IDC_CDP").alias("c_conyugue_idc"),
+        F.col("CONY_COMPLEMENTO_IDC_CDP").alias("c_conyugue_compl_idc"),
+        F.col("CONYUGUE_NOMBRE_CDP").alias("d_conyugue_nombre"),
+        F.col("CONYUGUE_PATERNO_CDP").alias("d_conyugue_ape_pat"),
+        F.col("CONYUGUE_MATERNO_CDP").alias("d_conyugue_ape_mat"),
+        F.col("CONYUGUE_FECHA_NAC_CDP").alias("f_conyugue_fec_nac"),
+        F.col("CONYUGUE_TELEFONO_CDP").alias("d_conyugue_telefono"),
+        F.col("D_CONY_PRF_CDP").alias("d_des_conyugue_prf"),
+        F.col("C_CONY_OCU_01_CDP").alias("c_conyugue_ocu_01"),
+        F.col("D_DES_CONY_OCU_01_CDP").alias("d_des_conyugue_ocu_01"),
+        F.col("C_CONY_OCU_02_CDL").alias("c_conyugue_ocu_02"),
+        F.col("D_DES_CONY_OCU_02_CDL").alias("d_des_conyugue_ocu_02"),
+        F.col("C_NAC_CONYUGUE_CDP").alias("c_conyugue_nac"),
+        F.col("D_DES_NAC_CONYUGUE_CDP").alias("d_conyugue_des_nac"),
+        F.col("C_PAIS_RES_CONYUGUE_CDP").alias("c_conyugue_residencia_pais_info"),
+        F.col("D_DES_PAIS_RES_CONYUGUE_CDP").alias("d_des_conyugue_residencia_pais_info"),
+        F.col("CONYUGUE_FL_RESIDENTE_CDP").alias("fl_conyugue_residente"),
+        F.col("CONYUGUE_NOMBRE_EMPRESA_CDP").alias("d_conyugue_nombre_emp"),
+        F.col("C_CONY_CARGO_CDL").alias("c_conyugue_cargo"),
+        F.col("D_DES_CONY_CARGO_CDL").alias("d_des_conyugue_cargo"),
+        F.col("CONYUGUE_SALARIO_CDP").alias("i_conyugue_salario"),
+        F.col("CONYUGUE_OTROS_INGRESOS_CDP").alias("i_conyugue_otr_ingresos"),
+        F.col("CONYUGUE_FECHA_LUGAR_TRABAJO_CDP").alias("d_fec_conyugue_ingreso_trabajo_info"),
+        F.col("C_CONY_ACTIVIDAD_CDC").alias("c_conyugue_actividad"),
+        F.col("D_CONY_ACTIVIDAD_CDC").alias("d_des_conyugue_actividad"),
+        F.col("C_CONY_CIIU_CDC").alias("c_conyugue_ciiu"),
+        F.col("D_CONY_CIIU_CDC").alias("d_conyugue_ciiu"),
+        F.col("NIT_PERSONAL_CDP").alias("d_nit_personal"),
+        F.col("RAZON_SOCIAL_CDP").alias("d_razon_social_personal"),
+        F.col("REFPERSONAL1_NOMBRE_CDP").alias("d_refpersonal1_nombre"),
+        F.col("REFPERSONAL1_DIRECCION_CDP").alias("d_refpersonal1_direccion"),
+        F.col("REFPERSONAL1_TELEFONO_CDP").alias("d_refpersonal1_telefono"),
+        F.col("REFPERSONAL2_NOMBRE_CDP").alias("d_refpersonal2_nombre"),
+        F.col("REFPERSONAL2_DIRECCION_CDP").alias("d_refpersonal2_direccion"),
+        F.col("REFPERSONAL2_TELEFONO_CDP").alias("d_refpersonal2_telefono"),
+        F.col("REFPERSONAL3_NOMBRE_CDP").alias("d_refpersonal3_nombre"),
+        F.col("REFPERSONAL3_DIRECCION_CDP").alias("d_refpersonal3_direccion"),
+        F.col("REFPERSONAL3_TELEFONO_CDP").alias("d_refpersonal3_telefono"),
+        F.col("REFCOMERCIAL1_NOMBRE_CDP").alias("d_refcomercial1_nombre"),
+        F.col("REFCOMERCIAL1_DIRECCION_CDP").alias("d_refcomercial1_direccion"),
+        F.col("REFCOMERCIAL1_TELEFONO_CDP").alias("d_refcomercial1_telefono"),
+        F.col("REFCOMERCIAL2_NOMBRE_CDP").alias("d_refcomercial2_nombre"),
+        F.col("REFCOMERCIAL2_DIRECCION_CDP").alias("d_refcomercial2_direccion"),
+        F.col("REFCOMERCIAL2_TELEFONO_CDP").alias("d_refcomercial2_telefono"),
+        F.col("REFCOMERCIAL3_NOMBRE_CDP").alias("d_refcomercial3_nombre"),
+        F.col("REFCOMERCIAL3_DIRECCION_CDP").alias("d_refcomercial3_direccion"),
+        F.col("REFCOMERCIAL3_TELEFONO_CDP").alias("d_refcomercial3_telefono"),
+        F.col("NOMBRE_EMPRESA_CDL").alias("d_nombre_emp"),
+        F.col("C_CARGO_CDL").alias("c_cargo"),
+        F.col("D_DES_CARGO_CDL").alias("d_des_cargo"),
+        F.col("TELEFONO_EMPRESA_CDL").alias("d_telefono_emp"),
+        F.col("CELULAR_EMPRESA_CDL").alias("d_celular_emp"),
+        F.col("C_COD_TELEFONO_TRABAJO_CDP").alias("c_cod_telefono_emp"),
+        F.col("CORREO_ELECTRONICO_CDL").alias("d_correo_electronico_emp"),
+        F.col("FL_PARIENTE_PEP_CDL").alias("fl_pariente_pep"),
+        F.col("FL_ASOCIADO_PEP_CDL").alias("fl_asociado_pep"),
+        F.col("FL_FUN_PUBLICO_CDL").alias("fl_fun_publico"),
+        F.col("INSTITUCION_PUBLICA_CDL").alias("d_institucion_publica"),
+        F.col("C_OCU_CDL").alias("c_ocu"),
+        F.col("D_DES_OCU_CDL").alias("d_des_ocu"),
+        F.col("NIT_CDL").alias("d_nit"),
+        F.col("SALARIO_CDL").alias("i_salario"),
+        F.col("C_ACTIVIDAD_CDL").alias("c_actividad"),
+        F.col("D_ACTIVIDAD_CDL").alias("d_actividad"),
+        F.col("C_CIIU_CDL").alias("c_ciiu"),
+        F.col("D_CIIU_CDL").alias("d_ciiu"),
+        F.col("FL_NEGOCIO_PROPIO_CDL").cast(IntegerType()).alias("fl_negocio_propio"),
+        F.col("FL_PEP_CDL").alias("fl_pep"),
+        F.col("CARGO_PEP_CDL").alias("d_cargo_pep"),
+        F.col("PERIODO_PEP_CDL").alias("d_periodo_pep"),
+        F.col("C_BANCO1_CDP").alias("c_refbanco1_cdp"),
+        F.col("D_DES_BANCO1_CDP").alias("d_refbanco1_cdp"),
+        F.col("C_BANCO2_CDP").alias("c_refbanco2_cdp"),
+        F.col("D_DES_BANCO2_CDP").alias("d_refbanco2_cdp"),
+        F.col("C_BANCO3_CDP").alias("c_refbanco3_cdp"),
+        F.col("D_DES_BANCO3_CDP").alias("d_refbanco3_cdp"),
+        F.col("C_PRODUCTO1_CDP").alias("c_refproducto1_cdp"),
+        F.col("D_DES_PRODUCTO1_CDP").alias("d_refproducto1_cdp"),
+        F.col("C_PRODUCTO2_CDP").alias("c_refproducto2_cdp"),
+        F.col("D_DES_PRODUCTO2_CDP").alias("d_refproducto2_cdp"),
+        F.col("C_PRODUCTO3_CDP").alias("c_refproducto3_cdp"),
+        F.col("D_DES_PRODUCTO3_CDP").alias("d_refproducto3_cdp"),
+        F.col("OTRO_BANCO_1").alias("d_des_otro_banco_01"),
+        F.col("OTRO_BANCO_2").alias("d_des_otro_banco_02"),
+        F.col("OTRO_BANCO_3").alias("d_des_otro_banco_03"),
+        F.col("C_PAIS_RES_CDP").alias("c_residencia_pais_info"),
+        F.col("D_DES_PAIS_RES_CDP").alias("d_des_residencia_pais_info"),
+        F.col("RESIDENTE_CDP").alias("fl_residente_info"),
+        F.col("FAX_CDP").alias("d_fax_info"),
+        F.col("INTERNO_EMPRESA_CDL").alias("d_interno_empresa_info"),
+        F.col("FECHA_LUGAR_TRABAJO_CDL").alias("d_fec_ingreso_trabajo_info"),
+        F.col("FUNC_NEG_CDP").alias("d_funcionario_negocios"),
+        F.col("DESMATERIALIZACION_CDP").alias("fl_desmaterializacion")
+    )
+
+
+#log.debug("Escritura del parquet")
+
+##df_final.count()
+##df_final.show(19,False)
+#df_final \
+#    .coalesce(1) \
+#    .write \
+#    .mode("overwrite") \
+#    .format("parquet") \
+#    .save(v_ruta_tabla)
