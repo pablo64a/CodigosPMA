@@ -1,0 +1,11 @@
+git init
+code .
+git status
+git add "idex.html"
+git add .      -> para subir todo
+git commit -m "mi primer commit"
+git commit -m "Modificacion index.html"
+git log
+git branch
+git checkout d5fbf82a2cce3c91ff559d9b6f1093c549d647c3
+git switch master
